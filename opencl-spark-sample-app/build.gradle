@@ -1,19 +1,32 @@
 apply plugin: 'java'
 
 repositories {
-    mavenCentral()
+	mavenCentral()
+}
+
+configurations {
+	provided
+		compile.extendsFrom provided
 }
 
 dependencies {
 	compile group:'org.jocl', name: 'jocl', version:'2.0.0'
+		provided group:'org.apache.spark', name: 'spark-core_2.10', version: '1.6.2'
 }
 
 jar {
-    manifest {
-        attributes 'Main-Class': 'org.jocl.samples.JOCLSample'
-    }
+	manifest {
+		attributes 'Main-Class': 'de.fau.i2.SparkOCL'
+	}
 
-  from {
-    configurations.compile.collect { it.isDirectory() ? it : zipTree(it) }
-  }
+	dependsOn configurations.runtime
+	from {
+		(configurations.runtime - configurations.provided).collect {
+			it.isDirectory() ? it : zipTree(it)
+		}
+	} {
+		exclude "META-INF/*.SF"
+			exclude "META-INF/*.DSA"
+			exclude "META-INF/*.RSA"
+	}
 }

@@ -34,10 +34,10 @@ public class JOCLSample
      * 
      * @param args Not used
      */
-    public static void main(String args[])
+    public static boolean main(String args[])
     {
         // Create input- and output data 
-        int n = 10;
+        int n = 10000000;
         float srcArrayA[] = new float[n];
         float srcArrayB[] = new float[n];
         float dstArray[] = new float[n];
@@ -124,7 +124,7 @@ public class JOCLSample
         
         // Set the work-item dimensions
         long global_work_size[] = new long[]{n};
-        long local_work_size[] = new long[]{1};
+        long local_work_size[] = new long[]{16};
         
         // Execute the kernel
         clEnqueueNDRangeKernel(commandQueue, kernel, 1, null,
@@ -157,10 +157,6 @@ public class JOCLSample
                 break;
             }
         }
-        System.out.println("Test "+(passed?"PASSED":"FAILED"));
-        if (n <= 10)
-        {
-            System.out.println("Result: "+java.util.Arrays.toString(dstArray));
-        }
+		return passed;
     }
 }
