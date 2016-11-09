@@ -37,7 +37,7 @@ public class JOCLSample
     public static boolean main(String args[])
     {
         // Create input- and output data 
-        int n = 10000000;
+        int n = 1000000;
         float srcArrayA[] = new float[n];
         float srcArrayB[] = new float[n];
         float dstArray[] = new float[n];

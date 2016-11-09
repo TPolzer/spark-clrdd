@@ -1,4 +1,4 @@
-apply plugin: 'java'
+apply plugin: 'scala'
 
 repositories {
 	mavenCentral()
@@ -9,9 +9,20 @@ configurations {
 		compile.extendsFrom provided
 }
 
+sourceSets {
+    main {
+        scala {
+            srcDirs = ['src/main/scala', 'src/main/java']
+        }
+	java {
+	    srcDirs = []
+	}
+    }
+}
+
 dependencies {
 	compile group:'org.jocl', name: 'jocl', version:'2.0.0'
-		provided group:'org.apache.spark', name: 'spark-core_2.10', version: '1.6.2'
+	provided group:'org.apache.spark', name: 'spark-core_2.11', version: '2.0.0'
 }
 
 jar {

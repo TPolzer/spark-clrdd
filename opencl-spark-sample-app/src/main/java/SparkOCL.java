@@ -12,8 +12,11 @@ public class SparkOCL {
 	public static void main(String[] args) {
 		JavaSparkContext sc = new JavaSparkContext();
 		
-		List<Integer> data = Arrays.asList(1, 2, 3, 4, 5);
-		JavaRDD<Integer> distData = sc.parallelize(data);
+		List<Integer> data = new ArrayList<Integer>();
+		for(int i=0; i<16; ++i) {
+			data.add(i);
+		}
+		JavaRDD<Integer> distData = sc.parallelize(data, 16);
 		List<Boolean> res = distData.map(i -> JOCLSample.main(null)).collect();
 		for(Boolean b : res)
 			System.out.println(b);
