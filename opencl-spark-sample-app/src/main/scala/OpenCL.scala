@@ -107,8 +107,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue)
     Option(programCache.get(source)).orElse({
         val program = clCreateProgramWithSource(context, source.size, source.toArray, null, null)
         val res = Program(program) // finalize if buildProgram throws
-        programCache.put(source, res)
         clBuildProgram(res.program, 0, null, "", null, null)
+        programCache.put(source, res)
         Option(res)
       }).get
   }
