@@ -2,7 +2,7 @@ import org.jocl.CL._
 import org.jocl._
 import org.slf4j.LoggerFactory
 import scala.collection.mutable.ArrayBuffer
-import java.util.WeakHashMap
+import java.util.HashMap
 import java.lang.ref.{ReferenceQueue, WeakReference}
 import java.util.concurrent.{Future, CompletableFuture}
 import java.nio.ByteOrder
@@ -77,17 +77,6 @@ object OpenCL
   }
 }
 
-object Test {
-  def main(args: Array[String]) = {
-    val chunk = OpenCL.get.stream((1 to 10).view.map(_.toDouble).iterator)(0)
-    val mapped = OpenCL.get.mapChunk(chunk, "return x*x;")
-    val b = clEnqueueMapBuffer(OpenCL.get.queue, mapped.handle, true, CL_MAP_READ, 0, 10*Sizeof.cl_double, 1, Array(mapped.ready), null, null).order(ByteOrder.nativeOrder).asDoubleBuffer
-    println((0 to 9).map(b.get(_)))
-    clWaitForEvents(1, Array(mapped.ready))
-    println((0 to 9).map(b.get(_)))
-  }
-}
-
 class OpenCLSession (val context: cl_context, val queue: cl_command_queue)
 {
   import OpenCL.{Program, Chunk, KernelArg, Dimensions}
@@ -96,10 +85,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue)
 
 
   /*
-   * The easy way out: Should keep most programs for long enough if not under
-   * severe memory pressure.
+   * TODO: proper cache (discard old programs)?
    */
-  private val programCache = java.util.Collections.synchronizedMap(new WeakHashMap[Seq[String], Program])
+  private val programCache = java.util.Collections.synchronizedMap(new HashMap[Seq[String], Program])
   /**
    * Build (or get from cache) an OpenCL program.
    */
