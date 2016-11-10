@@ -11,7 +11,7 @@ object OpenCL
   extends java.lang.ThreadLocal[OpenCLSession] // supplies one OpenCLSession per thread, round-robin over devices
 {
   setExceptionsEnabled(true)
-  val deviceType = CL_DEVICE_TYPE_CPU
+  val deviceType = CL_DEVICE_TYPE_GPU
   val devices = { // holds a function for creating a session for each device
     val numPlatforms = Array(0)
     clGetPlatformIDs(0, null, numPlatforms)
