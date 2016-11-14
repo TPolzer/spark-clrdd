@@ -5,7 +5,9 @@ import scala.collection.mutable.ArrayBuffer
 import java.util.HashMap
 import java.lang.ref.{ReferenceQueue, WeakReference}
 import java.util.concurrent.{Future, CompletableFuture}
+import java.util.concurrent.atomic.AtomicLong
 import java.nio.ByteOrder
+import java.nio.ByteBuffer
 
 object OpenCL
   extends java.lang.ThreadLocal[OpenCLSession] // supplies one OpenCLSession per thread, round-robin over devices
@@ -26,7 +28,7 @@ object OpenCL
       clGetDeviceIDs(platform, deviceType, numDevices(0), devices, null)
       devices.map(device => () => {
         val context = clCreateContext(contextProperties, 1, Array(device), null, null, null)
-        val queue = clCreateCommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, null) //deprecated for OpenCL 2.0, needed for 1.2!
+        val queue = clCreateCommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, null) //deprecated for OpenCL 2.0, needed for 1.2!
         new OpenCLSession(context, queue)
       })
     })
@@ -101,7 +103,11 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue)
       }).get
   }
 
+  var executionTime = new AtomicLong
+  var queueTime = new AtomicLong
+
   def callKernel(program: Program, kernelName: String, args: Seq[KernelArg], dependencies: Seq[cl_event], dimensions: Dimensions) : cl_event = {
+    val startTime = System.nanoTime
     val kernel = clCreateKernel(program.program, kernelName, null)
     val ready = new cl_event
     try {
@@ -119,6 +125,22 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue)
         waitList,
         ready
       )
+      clSetEventCallback(ready, CL_COMPLETE, new EventCallbackFunction() {
+        override def function(event: cl_event, command_exec_callback_type: Int, user_data: AnyRef) = {
+          val profiling = new Array[Long](1)
+          clGetEventProfilingInfo(ready, CL_PROFILING_COMMAND_QUEUED, Sizeof.cl_ulong, Pointer.to(profiling), null)
+          val queued = profiling(0)
+          clGetEventProfilingInfo(ready, CL_PROFILING_COMMAND_START, Sizeof.cl_ulong, Pointer.to(profiling), null)
+          val started = profiling(0)
+          clGetEventProfilingInfo(ready, CL_PROFILING_COMMAND_END, Sizeof.cl_ulong, Pointer.to(profiling), null)
+          val ended = profiling(0)
+          log.trace("kernel took {}ms", (ended-started)/1e6)
+          queueTime.addAndGet(ended - queued)
+          executionTime.addAndGet(ended - started)
+        }
+      }, null)
+      val endTime = System.nanoTime
+      log.trace("enqueuing kernel took {}ms", (endTime - startTime)/1e6)
       ready
     } catch {
       case e : Throwable => {
@@ -130,35 +152,47 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue)
     }
   }
 
-  def reduceChunk(input: Chunk, identityElement: String, reduceBody: String): Double = {
+  var ngroups = 8*1024
+  var nlocal = 128
+
+  def test(m: Int) = {
+    val a = new Array[Double](1024*1024*1024/8)
+    def time[A](a: => A) = { val now = System.nanoTime; val result = a; val micros = (System.nanoTime - now) / 1000; println("%f seconds".format(micros/1e6)); result};
+    def f(m: Int) = {val chunk: Seq[OpenCL.Chunk] = time(OpenCL.get.stream(a.iterator.take(1024*1024*m/8),1024*1024*m)); println(time((1 to (1024*1/m)).map(i => OpenCL.get.reduceChunk(chunk(0), "0", "return x+y;")).foldLeft(0.0)({case (x,f) => x + f.get}))); chunk(0).close}
+    {var a = OpenCL.get.queueTime.get; var b = OpenCL.get.executionTime.get; f(m); a = OpenCL.get.queueTime.get - a; b = OpenCL.get.executionTime.get - b; println(s"execution: ${b/1e6}ms")}
+  }
+
+  def reduceChunk(input: Chunk, identityElement: String, reduceBody: String): Future[Double] = {
+    val startTime = System.nanoTime
     val program = getProgram(Array(
-      "inline double f(double x, double y) {",
+      "inline double f(double x, double y) {\n",
       reduceBody,
-      "}",
-      "__kernel __attribute__((vec_type_hint(double)))",
-      "void reduce(__global double *input, __global double *output, __local double *scratch, int size) {",
-        "int tid = get_local_id(0);",
-        "int i = get_group_id(0) * get_local_size(0) + get_local_id(0);",
-        "int gridSize = get_local_size(0) * get_num_groups(0);",
-        s"double cur = $identityElement;",
-        "for (; i<size; i = i + gridSize){",
-          "cur = f(cur, input[i]);",
-        "}",
-        "scratch[tid]  = cur;",
-        "barrier(CLK_LOCAL_MEM_FENCE);",
-        "for (int s = get_local_size(0) / 2; s>0; s = s >> 1){",
-          "if (tid<s){",
-            "scratch[tid]  = f(scratch[tid], scratch[(tid + s)]);",
-          "}",
-          "barrier(CLK_LOCAL_MEM_FENCE);",
-        "}",
-        "if (tid==0){",
-          "output[get_group_id(0)]  = scratch[0];",
-        "}",
-        "return;",
-      "}").map(_++"\n"))
-    val numWorkGroups = 8*1024
-    val localSize = 64 // TODO make this tunable / evaluate...?
+      """}
+      __kernel
+      __attribute__((vec_type_hint(double)))
+      void reduce(__global double *input, __global double *output, __local double *scratch, int size) {
+        int tid = get_local_id(0);
+        int i = get_group_id(0) * get_local_size(0) + get_local_id(0);
+        int gridSize = get_local_size(0) * get_num_groups(0);
+        double cur = """, identityElement, """;
+        for (; i<size; i = i + gridSize){
+          cur = f(cur, input[i]);
+        }
+        scratch[tid]  = cur;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (int s = get_local_size(0) / 2; s>0; s = s >> 1){
+          if (tid<s){
+            scratch[tid]  = f(scratch[tid], scratch[(tid + s)]);
+          }
+          barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        if (tid==0){
+          output[get_group_id(0)]  = scratch[0];
+        }
+        return;
+      }"""))
+    val numWorkGroups = ngroups
+    val localSize = nlocal // TODO make this tunable / evaluate...?
     val globalSize = localSize * numWorkGroups
     val resBuffer : cl_mem = clCreateBuffer(context, 0, numWorkGroups * Sizeof.cl_double, null, null)
     val ready1 = callKernel(
@@ -173,12 +207,49 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue)
       ready1 :: Nil,
       Dimensions(1, Array(0), Array(localSize), Array(localSize))
     )
-    val result = Array(0.0)
-    clEnqueueReadBuffer(queue, resBuffer, true, 0, Sizeof.cl_double, Pointer.to(result), 1, Array(ready2), null)
-    clReleaseEvent(ready1) // TODO proper error handling!
-    clReleaseEvent(ready2)
+    val result = ByteBuffer.allocateDirect(Sizeof.cl_double)
+    val future = new CompletableFuture[Double]
+    val finished = new cl_event
+    clEnqueueReadBuffer(queue, resBuffer, false, 0, Sizeof.cl_double, Pointer.to(result), 1, Array(ready2), finished)
+    clSetEventCallback(finished, CL_COMPLETE, new EventCallbackFunction() {
+      override def function(event: cl_event, command_exec_callback_type: Int, user_data: AnyRef) = {
+        val profiling = new Array[Long](1)
+        clGetEventProfilingInfo(finished, CL_PROFILING_COMMAND_QUEUED, Sizeof.cl_ulong, Pointer.to(profiling), null)
+        val queued = profiling(0)
+        clGetEventProfilingInfo(finished, CL_PROFILING_COMMAND_START, Sizeof.cl_ulong, Pointer.to(profiling), null)
+        val started = profiling(0)
+        clGetEventProfilingInfo(finished, CL_PROFILING_COMMAND_END, Sizeof.cl_ulong, Pointer.to(profiling), null)
+        val ended = profiling(0)
+        clGetEventProfilingInfo(ready1, CL_PROFILING_COMMAND_QUEUED, Sizeof.cl_ulong, Pointer.to(profiling), null)
+        val stage1Queued = profiling(0)
+        clGetEventProfilingInfo(ready1, CL_PROFILING_COMMAND_START, Sizeof.cl_ulong, Pointer.to(profiling), null)
+        val stage1Started = profiling(0)
+        log.trace("stage1 waited in queue {}ms", (stage1Started - stage1Queued)/1e6)
+        clGetEventProfilingInfo(ready2, CL_PROFILING_COMMAND_END, Sizeof.cl_ulong, Pointer.to(profiling), null)
+        val reduceFinished = profiling(0)
+        clGetEventProfilingInfo(ready1, CL_PROFILING_COMMAND_END, Sizeof.cl_ulong, Pointer.to(profiling), null)
+        val stage1Finished = profiling(0)
+        log.trace("hiccup (reduce-reduce): {}ms", (reduceFinished-stage1Finished)/1e6)
+        log.trace("hiccup (reduce-read): {}ms", (started-reduceFinished)/1e6)
+        log.trace("read back took {}ms", (ended-started)/1e6)
+//        queueTime.addAndGet(ended - queued)
+//        executionTime.addAndGet(ended - started)
+        clReleaseEvent(ready1) // TODO proper error handling!
+        clReleaseEvent(ready2)
+        clReleaseEvent(finished)
+      }
+    }, null)
+    clSetEventCallback(finished, CL_COMPLETE, new EventCallbackFunction(){
+      override def function(event: cl_event, command_exec_callback_type: Int, user_data: AnyRef): Unit = 
+        future.complete(result.order(ByteOrder.nativeOrder).asDoubleBuffer.get(0))
+    }, null)
+    //clReleaseEvent(finished)
+    //clReleaseEvent(ready1) // TODO proper error handling!
+    //clReleaseEvent(ready2)
     clReleaseMemObject(resBuffer)
-    result(0)
+    val endTime = System.nanoTime
+    log.trace("reduce overhead took {}ms", (endTime - startTime)/1e6)
+    future
   }
 
   /**
@@ -194,9 +265,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue)
       "void map(__global double *input, __global double *output) {",
         "int i = get_global_id(0);",
         "output[i] = f(input[i]);",
-      "}").map(_++"\n"))
+      "}"))
     val dimensions = Dimensions(1, Array(0), Array(input.size), null)
-    val handle: cl_mem = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, input.size*Sizeof.cl_double, null, null)
+    val handle: cl_mem = clCreateBuffer(context, 0, input.size*Sizeof.cl_double, null, null)
     try {
       val ready = callKernel(
         program, "map",
@@ -221,23 +292,24 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue)
     val res = new ArrayBuffer[Chunk]
     try {
       while(it.hasNext) {
-        var chunk: Option[Chunk] = None
+        var ready = new cl_event
+        var handle : Option[cl_mem] = None
         try {
-          val handle: cl_mem = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, groupSize, null, null)
-          chunk = Some(new Chunk(0, handle, new cl_event))
-          val rawBuffer = clEnqueueMapBuffer(queue, handle, true, CL_MAP_WRITE, 0, groupSize, 0, null, null, null)
+          val rawBuffer = ByteBuffer.allocateDirect(groupSize)
           val buffer = rawBuffer.order(ByteOrder.nativeOrder).asDoubleBuffer
           var copied = 0
           while(copied < groupSize/Sizeof.cl_double && it.hasNext) {
             buffer.put(copied, it.next)
             copied += 1
           }
-          chunk = chunk.map(_.copy(size = copied))
-          clEnqueueUnmapMemObject(queue, handle, rawBuffer, 0, null, chunk.get.ready)
-          res += chunk.get
+          handle = Some(clCreateBuffer(context, 0, copied*8, null, null))
+          clEnqueueWriteBuffer(queue, handle.get, false, 0, copied*8, Pointer.to(rawBuffer), 0, null, ready)
+          res += Chunk(copied, handle.get, ready)
         } catch {
           case e:Throwable => {
-            chunk.foreach(_.close)
+            if(ready != new cl_event)
+              clReleaseEvent(ready)
+            handle.foreach(clReleaseMemObject)
             throw e
           }
         }
