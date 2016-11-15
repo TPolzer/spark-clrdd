@@ -10,33 +10,41 @@ import java.nio.ByteOrder
 import java.nio.ByteBuffer
 
 object OpenCL
-  extends java.lang.ThreadLocal[OpenCLSession] // supplies one OpenCLSession per thread, round-robin over devices
+  extends java.lang.ThreadLocal[OpenCLSession] // supplies one OpenCLSession per device, round-robin over threads
 {
   setExceptionsEnabled(true)
   val deviceType = CL_DEVICE_TYPE_GPU
-  val devices = { // holds a function for creating a session for each device
+  lazy val devices = { // holds one session for each device
     val numPlatforms = Array(0)
     clGetPlatformIDs(0, null, numPlatforms)
     val platforms = new Array[cl_platform_id](numPlatforms(0))
     clGetPlatformIDs(platforms.length, platforms, null)
     platforms.flatMap(platform => {
-      val contextProperties = new cl_context_properties
-      contextProperties.addProperty(CL_CONTEXT_PLATFORM, platform)
-      val numDevices = Array(0)
-      clGetDeviceIDs(platform, deviceType, 0, null, numDevices)
-      val devices = new Array[cl_device_id](numDevices(0))
-      clGetDeviceIDs(platform, deviceType, numDevices(0), devices, null)
-      devices.map(device => () => {
-        val context = clCreateContext(contextProperties, 1, Array(device), null, null, null)
-        val queue = clCreateCommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, null) //deprecated for OpenCL 2.0, needed for 1.2!
-        new OpenCLSession(context, queue, device)
-      })
+      try {
+        val contextProperties = new cl_context_properties
+        contextProperties.addProperty(CL_CONTEXT_PLATFORM, platform)
+        val numDevices = Array(0)
+        clGetDeviceIDs(platform, deviceType, 0, null, numDevices)
+        val devices = new Array[cl_device_id](numDevices(0))
+        clGetDeviceIDs(platform, deviceType, numDevices(0), devices, null)
+        devices.flatMap(device => {
+          try{
+            val context = clCreateContext(contextProperties, 1, Array(device), null, null, null)
+            val queue = clCreateCommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, null) //deprecated for OpenCL 2.0, needed for 1.2!
+            Some(new OpenCLSession(context, queue, device))
+          } catch {
+            case e: CLException => None
+          }
+        })
+      } catch {
+        case e: CLException => Nil
+      }
     })
   }
 
   override protected def initialValue = {
     val threadId = java.lang.Thread.currentThread.getId
-    devices((threadId % devices.size.toLong).toInt)()
+    devices((threadId % devices.size.toLong).toInt)
   }
 
   /**
