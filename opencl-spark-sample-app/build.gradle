@@ -1,7 +1,8 @@
 apply plugin: 'scala'
 
 repositories {
-	mavenCentral()
+    mavenCentral()
+    mavenLocal()
 }
 
 configurations {
@@ -21,7 +22,7 @@ sourceSets {
 }
 
 dependencies {
-	compile group:'org.jocl', name: 'jocl', version:'2.0.0'
+	compile group:'org.jocl', name: 'jocl', version:'2.0.1-SNAPSHOT'
 	provided group:'org.apache.spark', name: 'spark-core_2.11', version: '2.0.0'
 }
 
