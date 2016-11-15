@@ -13,7 +13,8 @@ object OpenCL
   extends java.lang.ThreadLocal[OpenCLSession] // supplies one OpenCLSession per device, round-robin over threads
 {
   setExceptionsEnabled(true)
-  val deviceType = CL_DEVICE_TYPE_GPU
+  val CPU = false
+  lazy val deviceType = if(CPU) CL_DEVICE_TYPE_CPU else CL_DEVICE_TYPE_GPU
   lazy val devices = { // holds one session for each device
     val numPlatforms = Array(0)
     clGetPlatformIDs(0, null, numPlatforms)
@@ -166,19 +167,43 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }
   }
 
-  var ngroups = 8*1024
-  var nlocal = 128
-
+  /*
+   * parallelization happens outside OpenCL for CPU
+   */
+  var ngroups = if(OpenCL.CPU) 1 else 8*1024
+  var nlocal = if(OpenCL.CPU) 1 else 128
+  
+  var testSize = 1
   lazy val a = new Array[Double](1024*1024*1024/8)
   def test(m: Int) = {
     def time[A](a: => A) = { val now = System.nanoTime; val result = a; val micros = (System.nanoTime - now) / 1000; println("%f seconds".format(micros/1e6)); result};
-    def f(m: Int) = {val chunk: Seq[OpenCL.Chunk] = time(stream(a.iterator.take(1024*1024*m/8),1024*1024*m)); clFinish(queue); println(time((1 to (1024*10/m)).map(i => reduceChunk(chunk(0), "0", "return x+y;")).foldLeft(0.0)({case (x,f) => x + f.get}))); chunk(0).close}
+    def f(m: Int) = {val chunk: Seq[OpenCL.Chunk] = time(stream(a.iterator.take(1024*1024*m/8),1024*1024*m)); clFinish(queue); println(time((1 to (1024*testSize/m)).map(i => reduceChunk(chunk(0), "0", "return x+y;")).foldLeft(0.0)({case (x,f) => x + f.get}))); chunk(0).close}
     {var a = queueTime.get; var b = executionTime.get; f(m); a = queueTime.get - a; b = executionTime.get - b; println(s"execution: ${b/1e6}ms")}
   }
 
   def reduceChunk(input: Chunk, identityElement: String, reduceBody: String): Future[Double] = {
     val startTime = System.nanoTime
-    val program = getProgram(Array(
+    val program = if (OpenCL.CPU)
+      getProgram(Array(
+      "inline double f(double x, double y) {\n",
+      reduceBody,
+      """}
+      __kernel
+      __attribute__((vec_type_hint(double)))
+      void reduce(__global const double *input, __global double *output, __local double *scratch, int size) {
+        if(get_global_id(0) == 0) {
+          double cur = """, identityElement, """;
+          for(int i=0; i<size; ++i) {
+            cur  = f(cur, input[i]);
+          }
+          output[0] = cur;
+        } else {
+          output[get_group_id(0)] = """, identityElement, """;
+        }
+        return;
+      }"""))
+    else
+      getProgram(Array(
       "inline double f(double x, double y) {\n",
       reduceBody,
       """}
