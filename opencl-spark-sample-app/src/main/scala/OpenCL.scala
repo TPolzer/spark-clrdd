@@ -153,7 +153,6 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
 
       val endTime = System.nanoTime
       log.trace("callKernel took {}ms", (endTime - startTime)/1e6)
-      clRetainEvent(ready)
     } finally {
       kernel.foreach(clReleaseKernel)
     }
