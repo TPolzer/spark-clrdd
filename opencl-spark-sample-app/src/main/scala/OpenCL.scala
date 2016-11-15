@@ -14,7 +14,7 @@ object OpenCL
   extends java.lang.ThreadLocal[OpenCLSession] // supplies one OpenCLSession per device, round-robin over threads
 {
   setExceptionsEnabled(true)
-  val CPU = false
+  val CPU = true
   lazy val deviceType = if(CPU) CL_DEVICE_TYPE_CPU else CL_DEVICE_TYPE_GPU
   lazy val devices = { // holds one session for each device
     val numPlatforms = Array(0)
@@ -43,6 +43,8 @@ object OpenCL
       }
     })
   }
+
+  def safeReleaseEvent(e: cl_event) = if(e != new cl_event) clReleaseEvent(e)
 
   override protected def initialValue = {
     val threadId = java.lang.Thread.currentThread.getId
@@ -88,7 +90,7 @@ object OpenCL
 
 class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val device: cl_device_id)
 {
-  import OpenCL.{Program, Chunk, KernelArg, Dimensions}
+  import OpenCL.{Program, Chunk, KernelArg, Dimensions, safeReleaseEvent}
   val log = LoggerFactory.getLogger(getClass)
   log.info("created OpenCLSession")
 
@@ -118,7 +120,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       rawBuffer.foreach(b => {
         clEnqueueUnmapMemObject(queue, chunk.handle, b, 0, null, null)
         clReleaseMemObject(chunk.handle)
-        clReleaseEvent(ready)
+        safeReleaseEvent(ready)
       })
       rawBuffer = None
     }
@@ -161,7 +163,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         log.trace("kernel took {}ms", (ended-started)/1e6)
         queueTime.addAndGet(ended - queued)
         executionTime.addAndGet(ended - started)
-      } finally clReleaseEvent(ready)
+      } finally safeReleaseEvent(ready)
     }
   }
 
@@ -223,7 +225,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       """}
       __kernel
       __attribute__((vec_type_hint(double)))
-      void reduce(__global const double *input, __global double *output, __local double *scratch, int size) {
+      void reduce(__global double *input, __global double *output, __local double *scratch, int size) {
         if(get_global_id(0) == 0) {
           double cur = """, identityElement, """;
           for(int i=0; i<size; ++i) {
@@ -242,7 +244,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       """}
       __kernel
       __attribute__((vec_type_hint(double)))
-      void reduce(__global const double *input, __global double *output, __local double *scratch, int size) {
+      void reduce(__global double *input, __global double *output, __local double *scratch, int size) {
         int tid = get_local_id(0);
         int i = get_group_id(0) * get_local_size(0) + get_local_id(0);
         int gridSize = get_local_size(0) * get_num_groups(0);
@@ -298,9 +300,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       }, null)
       future
     } finally {
-      clReleaseEvent(finished)
-      clReleaseEvent(ready1)
-      clReleaseEvent(ready2)
+      safeReleaseEvent(finished)
+      safeReleaseEvent(ready1)
+      safeReleaseEvent(ready2)
       clReleaseMemObject(resBuffer)
       val endTime = System.nanoTime
       log.trace("reduce overhead took {}ms", (endTime - startTime)/1e6)
@@ -374,12 +376,16 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
           //val rawBuffer = ByteBuffer.allocateDirect(groupSize)
           on_host = Some(clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, groupSize, null, null))
           val rawBuffer = clEnqueueMapBuffer(queue, on_host.get, true, CL_MAP_WRITE, 0, groupSize, 0, null, null, null)
+          log.trace("mapped buffer {}", on_host.get)
           val buffer = rawBuffer.order(ByteOrder.nativeOrder).asDoubleBuffer
           var copied = 0
           while(copied < groupSize/Sizeof.cl_double && it.hasNext) {
+            if(copied % 100000 == 0)
+              log.trace("copied {} to {}", copied, on_host.get)
             buffer.put(copied, it.next)
             copied += 1
           }
+          log.trace("unmapping buffer {}", on_host.get)
           clEnqueueUnmapMemObject(queue, on_host.get, rawBuffer, 0, null, unmapEvent)
           
           if(ALLOC_HOST_PTR_ON_DEVICE) {
@@ -393,7 +399,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         } finally {
           on_device.foreach(clReleaseMemObject)
           on_host.foreach(clReleaseMemObject)
-          clReleaseEvent(unmapEvent)
+          safeReleaseEvent(unmapEvent)
         }
       }
       clEnqueueBarrierWithWaitList(queue, 0, null, null)
