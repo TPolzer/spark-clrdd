@@ -3,6 +3,7 @@ import org.jocl._
 import org.slf4j.LoggerFactory
 import scala.collection.mutable.ArrayBuffer
 import java.util.HashMap
+import java.util.PrimitiveIterator
 import java.lang.ref.{ReferenceQueue, WeakReference}
 import java.util.concurrent.{Future, CompletableFuture, ConcurrentHashMap}
 import java.util.concurrent.atomic.AtomicLong
@@ -91,6 +92,38 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   val log = LoggerFactory.getLogger(getClass)
   log.info("created OpenCLSession")
 
+  case class ChunkIterator(chunk: Chunk)
+    extends Iterator[Double] with java.io.Closeable
+  {
+    clRetainMemObject(chunk.handle)
+    var ready = new cl_event
+    private var rawBuffer: Option[ByteBuffer] = Some(clEnqueueMapBuffer(queue, chunk.handle, false, CL_MAP_READ, 0, Sizeof.cl_double * chunk.size, 0, null, ready, null))
+    val buffer = rawBuffer.get.order(ByteOrder.nativeOrder).asDoubleBuffer
+    override def hasNext = {
+      val res = (idx != chunk.size)
+      if(!res)
+        close
+      res
+    }
+    override def next = {
+      if(ready != new cl_event) {
+        clWaitForEvents(1, Array(ready))
+        ready = new cl_event
+      }
+      idx += 1
+      buffer.get(idx-1)
+    }
+    private var idx = 0
+    override def close : Unit = {
+      rawBuffer.foreach(b => {
+        clEnqueueUnmapMemObject(queue, chunk.handle, b, 0, null, null)
+        clReleaseMemObject(chunk.handle)
+        clReleaseEvent(ready)
+      })
+      rawBuffer = None
+    }
+    override def finalize: Unit = close
+  }
 
   /*
    * TODO: proper cache (discard old programs)?

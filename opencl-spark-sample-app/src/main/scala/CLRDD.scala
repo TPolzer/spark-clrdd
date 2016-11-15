@@ -1,5 +1,6 @@
 import org.apache.spark.rdd._
 import org.apache.spark._
+import scala.collection.JavaConverters._
 
 object CLDoubleRDD
 {
@@ -17,7 +18,7 @@ class CLDoubleRDD (val wrapped: RDD[CLDoublePartition], val parentRDD: RDD[Doubl
 {
   override def compute(split: Partition, ctx: TaskContext) : Iterator[Double] = {
     val partition = wrapped.iterator(split, ctx)
-    partition.next.copyOrGet(ctx).iterator
+    partition.next.iterator(ctx)
   }
 
   override protected def getPartitions : Array[Partition] = {
@@ -27,15 +28,31 @@ class CLDoubleRDD (val wrapped: RDD[CLDoublePartition], val parentRDD: RDD[Doubl
   override protected def getDependencies : Seq[Dependency[_]] = {
     Array(new OneToOneDependency(wrapped), new OneToOneDependency(parentRDD))
   }
+  
+  def sum : Double = {
+    wrapped.map(_.sum).sum
+  }
 }
 
 class CLDoublePartition (val parentPartition: Partition, val parentRDD: RDD[Double])
 {
-  @transient private var storage : Array[Double] = null
+  @transient private var session : OpenCLSession = null
+  @transient private var storage : Seq[OpenCL.Chunk] = null
   def copyOrGet (ctx: TaskContext) = {
     if (storage == null) {
-      storage = parentRDD.iterator(parentPartition, ctx).toArray
+      session = OpenCL.get
+      storage = session.stream(parentRDD.iterator(parentPartition, ctx))
     }
     storage
   }
+  def sum : Double = {
+    val ctx = TaskContext.get
+    copyOrGet(ctx).view.map(c => session.reduceChunk(c, "0", "return x+y;")).foldLeft(0.0)({case (x,f) => x + f.get})
+  }
+  def iterator (ctx: TaskContext) : Iterator[Double] = {
+    copyOrGet(ctx).iterator.flatMap(chunk => session.ChunkIterator(chunk))
+  }
+  override def finalize : Unit = 
+    if(storage != null)
+      storage.foreach(_.close)
 }
