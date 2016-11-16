@@ -14,7 +14,7 @@ object OpenCL
   extends java.lang.ThreadLocal[OpenCLSession] // supplies one OpenCLSession per device, round-robin over threads
 {
   setExceptionsEnabled(true)
-  val CPU = true
+  var CPU = false
   lazy val deviceType = if(CPU) CL_DEVICE_TYPE_CPU else CL_DEVICE_TYPE_GPU
   lazy val devices = { // holds one session for each device
     val numPlatforms = Array(0)
@@ -203,16 +203,16 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   }
 
   /*
-   * parallelization happens outside OpenCL for CPU
+   * parallelization happens outside Chunks for CPU
    */
   var ngroups = if(OpenCL.CPU) 1 else 8*1024
   var nlocal = if(OpenCL.CPU) 1 else 128
   
   var testSize = 1
-  lazy val a = new Array[Double](1024*1024*1024/8)
+  lazy val a = new Array[Double](1024*1024*1024/Sizeof.cl_double)
   def test(m: Int) = {
     def time[A](a: => A) = { val now = System.nanoTime; val result = a; val micros = (System.nanoTime - now) / 1000; println("%f seconds".format(micros/1e6)); result};
-    def f(m: Int) = {val chunk: Seq[OpenCL.Chunk] = time(stream(a.iterator.take(1024*1024*m/8),1024*1024*m)); clFinish(queue); println(time((1 to (1024*testSize/m)).map(i => reduceChunk(chunk(0), "0", "return x+y;")).foldLeft(0.0)({case (x,f) => x + f.get}))); chunk(0).close}
+    def f(m: Int) = {val chunk: Seq[OpenCL.Chunk] = time(stream(a.iterator.take(1024*1024*m/Sizeof.cl_double),1024*1024*m)); clFinish(queue); println(time((1 to (1024*testSize/m)).map(i => reduceChunk(chunk(0), "0", "return x+y;")).foldLeft(0.0)({case (x,f) => x + f.get}))); chunk(0).close}
     {var a = queueTime.get; var b = executionTime.get; f(m); a = queueTime.get - a; b = executionTime.get - b; println(s"execution: ${b/1e6}ms")}
   }
 
@@ -220,7 +220,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     val startTime = System.nanoTime
     val program = if (OpenCL.CPU)
       getProgram(Array(
-      "inline double f(double x, double y) {\n",
+      """#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+      inline double f(double x, double y) {""",
       reduceBody,
       """}
       __kernel
@@ -232,14 +233,15 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
             cur  = f(cur, input[i]);
           }
           output[0] = cur;
-        } else {
+        } else if(get_local_id(0) == 0) {
           output[get_group_id(0)] = """, identityElement, """;
         }
         return;
       }"""))
     else
       getProgram(Array(
-      "inline double f(double x, double y) {\n",
+      """#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+      inline double f(double x, double y) {""",
       reduceBody,
       """}
       __kernel
@@ -269,33 +271,36 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     val numWorkGroups = ngroups
     val localSize = nlocal // TODO make this tunable / evaluate...?
     val globalSize = localSize * numWorkGroups
-    val resBuffer : cl_mem = clCreateBuffer(context, 0, numWorkGroups * Sizeof.cl_double, null, null)
     val finished = new cl_event
     val ready1 = new cl_event
     val ready2 = new cl_event
+    var reduceBuffer : Option[cl_mem] = None
+    var resBuffer : Option[cl_mem] = None
     try {
+      reduceBuffer = Some(clCreateBuffer(context, 0, numWorkGroups * Sizeof.cl_double, null, null))
+      resBuffer = Some(clCreateBuffer(context, 0, Sizeof.cl_double, null, null))
       callKernel(
         program, "reduce",
-        KernelArg(input.handle) :: KernelArg(resBuffer) :: KernelArg(null, Sizeof.cl_double * localSize) :: KernelArg(input.size) :: Nil,
+        KernelArg(input.handle) :: KernelArg(reduceBuffer.get) :: KernelArg(null, Sizeof.cl_double * localSize) :: KernelArg(input.size) :: Nil,
         null,
         Dimensions(1, Array(0), Array(globalSize), Array(localSize)),
         ready1
       )
       callKernel(
         program, "reduce",
-        KernelArg(resBuffer) :: KernelArg(resBuffer) :: KernelArg(null, Sizeof.cl_double * localSize) :: KernelArg(numWorkGroups) :: Nil,
+        KernelArg(reduceBuffer.get) :: KernelArg(resBuffer.get) :: KernelArg(null, Sizeof.cl_double * localSize) :: KernelArg(numWorkGroups) :: Nil,
         Array(ready1),
         Dimensions(1, Array(0), Array(localSize), Array(localSize)),
         ready2
       )
       val future = new CompletableFuture[Double]
-      val result = clEnqueueMapBuffer(queue, resBuffer, false, CL_MAP_READ, 0, Sizeof.cl_double, 1, Array(ready2), finished, null)
+      val result = clEnqueueMapBuffer(queue, resBuffer.get, false, CL_MAP_READ, 0, Sizeof.cl_double, 1, Array(ready2), finished, null)
       clSetEventCallback(finished, CL_COMPLETE, new EventCallbackFunction(){
-        clRetainMemObject(resBuffer)
+        clRetainMemObject(resBuffer.get)
         override def function(event: cl_event, command_exec_callback_type: Int, user_data: AnyRef): Unit = {
           future.complete(result.order(ByteOrder.nativeOrder).asDoubleBuffer.get(0))
-          clEnqueueUnmapMemObject(queue, resBuffer, result, 0, null, null)
-          clReleaseMemObject(resBuffer)
+          clEnqueueUnmapMemObject(queue, resBuffer.get, result, 0, null, null)
+          clReleaseMemObject(resBuffer.get)
         }
       }, null)
       future
@@ -303,7 +308,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       safeReleaseEvent(finished)
       safeReleaseEvent(ready1)
       safeReleaseEvent(ready2)
-      clReleaseMemObject(resBuffer)
+      resBuffer.foreach(clReleaseMemObject)
+      reduceBuffer.foreach(clReleaseMemObject)
       val endTime = System.nanoTime
       log.trace("reduce overhead took {}ms", (endTime - startTime)/1e6)
     }
@@ -315,7 +321,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    */
   def mapChunk(input: Chunk, functionBody: String) : Chunk = {
     val program = getProgram(Array(
-      "inline double f(double x) {",
+      """#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+      inline double f(double x) {""",
       functionBody,
       "}",
       "__kernel __attribute__((vec_type_hint(double)))",
@@ -392,8 +399,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
             on_device = on_host
             on_host = None
           } else {
-            on_device = Some(clCreateBuffer(context, CL_MEM_READ_ONLY, copied*8, null, null))
-            clEnqueueCopyBuffer(queue, on_host.get, on_device.get, 0, 0, copied*8, 1, Array(unmapEvent), null)
+            on_device = Some(clCreateBuffer(context, CL_MEM_READ_ONLY, copied*Sizeof.cl_double, null, null))
+            clEnqueueCopyBuffer(queue, on_host.get, on_device.get, 0, 0, copied*Sizeof.cl_double, 1, Array(unmapEvent), null)
           }
           res += Chunk(copied, on_device.get)
         } finally {
