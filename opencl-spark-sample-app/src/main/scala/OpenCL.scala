@@ -140,7 +140,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     Option(programCache.get(source)).orElse({
         val program = clCreateProgramWithSource(context, source.size, source.toArray, null, null)
         val res = Program(program) // finalize if buildProgram throws
-        clBuildProgram(res.program, 0, null, "", null, null)
+        clBuildProgram(res.program, 0, null, "-cl-unsafe-math-optimizations", null, null)
         programCache.put(source, res)
         Option(res)
       }).get
