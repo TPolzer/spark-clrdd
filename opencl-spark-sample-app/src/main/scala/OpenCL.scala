@@ -81,8 +81,9 @@ object OpenCL
   ) {
   }
 
-  case class Chunk (
-    val size: Int, //bytes
+  case class Chunk[T] (
+    val size: Int, //used elements
+    val space: Int, //allocated size in bytes
     var handle: cl_mem,
     var ready: cl_event
   )
@@ -107,19 +108,49 @@ object OpenCL
   }
 }
 
+object CLType {
+  implicit object CLDouble extends CLType[Double] {
+    override val clName = "double"
+    override val sizeOf = Sizeof.cl_double
+    override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
+      rawBuffer.order(ByteOrder.nativeOrder).getDouble(idx * sizeOf)
+    }
+    override def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: Double) = {
+      rawBuffer.order(ByteOrder.nativeOrder).putDouble(idx * sizeOf, v)
+    }
+  }
+  implicit object CLInt extends CLType[Int] {
+    override val clName = "int"
+    override val sizeOf = Sizeof.cl_int
+    override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
+      rawBuffer.order(ByteOrder.nativeOrder).getInt(idx * sizeOf)
+    }
+    override def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: Int) = {
+      rawBuffer.order(ByteOrder.nativeOrder).putInt(idx * sizeOf, v)
+    }
+  }
+}
+
+trait CLType[@specialized(Double, Float, Int, Long) T] {
+  val clName: String
+  val sizeOf: Int
+  val header: String = ""
+  def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer): T
+  def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: T): Unit
+}
+
 class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val device: cl_device_id)
 {
   import OpenCL.{Program, Chunk, KernelArg, Dimensions, safeReleaseEvent}
   val log = LoggerFactory.getLogger(getClass)
   log.info("created OpenCLSession")
 
-  case class ChunkIterator(chunk: Chunk)
-    extends Iterator[Double] with java.io.Closeable
+  case class ChunkIterator[@specialized(Double, Float, Int, Long) T](chunk: Chunk[T])(implicit clT: CLType[T])
+    extends Iterator[T] with java.io.Closeable
   {
     clRetainMemObject(chunk.handle)
     var ready = new cl_event
     private var rawBuffer: Option[ByteBuffer] = Some(clEnqueueMapBuffer(queue, chunk.handle, false, CL_MAP_READ, 0, Sizeof.cl_double * chunk.size, 1, Array(chunk.ready), ready, null))
-    val buffer = rawBuffer.get.order(ByteOrder.nativeOrder).asDoubleBuffer
     override def hasNext = {
       val res = (idx != chunk.size)
       if(!res)
@@ -132,7 +163,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         ready = new cl_event
       }
       idx += 1
-      buffer.get(idx-1)
+      clT.fromByteBuffer(idx-1, rawBuffer.get)
     }
     private var idx = 0
     override def close : Unit = {
@@ -147,7 +178,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   }
 
   private val programCache = Cache2kBuilder.of(classOf[Seq[String]], classOf[Program])
-    .entryCapacity(20)
+    .entryCapacity(100)
     .loader(new CacheLoader[Seq[String],Program](){
       override def load(source: Seq[String]) : Program = {
         val program = clCreateProgramWithSource(context, source.size, source.toArray, null, null)
@@ -224,28 +255,22 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    */
   var ngroups = if(OpenCL.CPU) 1 else 8*1024
   var nlocal = if(OpenCL.CPU) 1 else 128
-  
-  var testSize = 1
-  lazy val a = new Array[Double](1024*1024*1024/Sizeof.cl_double)
-  def test(m: Int) = {
-    def time[A](a: => A) = { val now = System.nanoTime; val result = a; val micros = (System.nanoTime - now) / 1000; println("%f seconds".format(micros/1e6)); result};
-    def f(m: Int) = {val chunk: Seq[OpenCL.Chunk] = time(stream(a.iterator.take(1024*1024*m/Sizeof.cl_double),1024*1024*m).toSeq); clFinish(queue); println(time((1 to (1024*testSize/m)).map(i => reduceChunk(chunk(0), "0", "return x+y;")).foldLeft(0.0)({case (x,f) => x + f.get}))); chunk(0).close}
-    {var a = queueTime.get; var b = executionTime.get; f(m); a = queueTime.get - a; b = executionTime.get - b; println(s"execution: ${b/1e6}ms")}
-  }
-
-  def reduceChunk(input: Chunk, identityElement: String, reduceBody: String): Future[Double] = {
+ 
+  def reduceChunk[T](input: Chunk[T], header: String, identityElement: String, reduceBody: String)(implicit clT: CLType[T]): Future[T] = {
+    val elemType = clT.clName
     val startTime = System.nanoTime
     val program = if (OpenCL.CPU)
       getProgram(Array(
-      """#pragma OPENCL EXTENSION cl_khr_fp64 : enable
-      inline double f(double x, double y) {""",
+      "#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n",
+      header,
+      "inline ", elemType, " f(", elemType," x, ", elemType, " y) {\n",
       reduceBody,
       """}
       __kernel
-      __attribute__((vec_type_hint(double)))
-      void reduce(__global double *input, __global double *output, __local double *scratch, int size) {
+      __attribute__((vec_type_hint(""", elemType, """)))
+      void reduce(__global """, elemType, """ *input, __global """, elemType, """ *output, __local """, elemType, """ *scratch, int size) {
         if(get_global_id(0) == 0) {
-          double cur = """, identityElement, """;
+          """, elemType, """ cur = """, identityElement, """;
           for(int i=0; i<size; ++i) {
             cur  = f(cur, input[i]);
           }
@@ -257,17 +282,18 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       }"""))
     else
       getProgram(Array(
-      """#pragma OPENCL EXTENSION cl_khr_fp64 : enable
-      inline double f(double x, double y) {""",
+      "#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n",
+      header,
+      "inline ", elemType, " f(", elemType," x, ", elemType, " y) {\n",
       reduceBody,
       """}
       __kernel
-      __attribute__((vec_type_hint(double)))
-      void reduce(__global double *input, __global double *output, __local double *scratch, int size) {
+      __attribute__((vec_type_hint(""", elemType, """)))
+      void reduce(__global """, elemType, """ *input, __global """, elemType, """ *output, __local """, elemType, """ *scratch, int size) {
         int tid = get_local_id(0);
         int i = get_group_id(0) * get_local_size(0) + get_local_id(0);
         int gridSize = get_local_size(0) * get_num_groups(0);
-        double cur = """, identityElement, """;
+        """, elemType, """ cur = """, identityElement, """;
         for (; i<size; i = i + gridSize){
           cur = f(cur, input[i]);
         }
@@ -294,28 +320,28 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     var reduceBuffer : Option[cl_mem] = None
     var resBuffer : Option[cl_mem] = None
     try {
-      reduceBuffer = Some(clCreateBuffer(context, 0, numWorkGroups * Sizeof.cl_double, null, null))
-      resBuffer = Some(clCreateBuffer(context, 0, Sizeof.cl_double, null, null))
+      reduceBuffer = Some(clCreateBuffer(context, 0, numWorkGroups * clT.sizeOf, null, null))
+      resBuffer = Some(clCreateBuffer(context, 0, clT.sizeOf, null, null))
       callKernel(
         program, "reduce",
-        KernelArg(input.handle) :: KernelArg(reduceBuffer.get) :: KernelArg(null, Sizeof.cl_double * localSize) :: KernelArg(input.size) :: Nil,
+        KernelArg(input.handle) :: KernelArg(reduceBuffer.get) :: KernelArg(null, clT.sizeOf * localSize) :: KernelArg(input.size) :: Nil,
         Array(input.ready),
         Dimensions(1, Array(0), Array(globalSize), Array(localSize)),
         ready1
       )
       callKernel(
         program, "reduce",
-        KernelArg(reduceBuffer.get) :: KernelArg(resBuffer.get) :: KernelArg(null, Sizeof.cl_double * localSize) :: KernelArg(numWorkGroups) :: Nil,
+        KernelArg(reduceBuffer.get) :: KernelArg(resBuffer.get) :: KernelArg(null, clT.sizeOf * localSize) :: KernelArg(numWorkGroups) :: Nil,
         Array(ready1),
         Dimensions(1, Array(0), Array(localSize), Array(localSize)),
         ready2
       )
-      val future = new CompletableFuture[Double]
-      val result = clEnqueueMapBuffer(queue, resBuffer.get, false, CL_MAP_READ, 0, Sizeof.cl_double, 1, Array(ready2), finished, null)
+      val future = new CompletableFuture[T]
+      val result = clEnqueueMapBuffer(queue, resBuffer.get, false, CL_MAP_READ, 0, clT.sizeOf, 1, Array(ready2), finished, null)
       clSetEventCallback(finished, CL_COMPLETE, new EventCallbackFunction(){
         clRetainMemObject(resBuffer.get)
         override def function(event: cl_event, command_exec_callback_type: Int, user_data: AnyRef): Unit = {
-          future.complete(result.order(ByteOrder.nativeOrder).asDoubleBuffer.get(0))
+          future.complete(clT.fromByteBuffer(0, result))
           clEnqueueUnmapMemObject(queue, resBuffer.get, result, 0, null, null)
           clReleaseMemObject(resBuffer.get)
         }
@@ -333,35 +359,63 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   }
 
   /**
-   * Map one Chunk to a new one. YOU NEED A BARRIER AFTERWARDS!
-   * @param functionBody the body of the map function 'inline double f(double x) {#functionBody}'.
+   * Map one Chunk to a new one.
+   * @param functionBody the body of the map function 'inline B f(A x) {#functionBody}'.
+   * @param destructive if true, mapping is done in place if possible
    */
-  def mapChunk(input: Chunk, functionBody: String) : Chunk = {
-    val program = getProgram(Array(
-      """#pragma OPENCL EXTENSION cl_khr_fp64 : enable
-      inline double f(double x) {""",
-      functionBody,
-      "}",
-      "__kernel __attribute__((vec_type_hint(double)))",
-      "void map(__global double *input, __global double *output) {",
-        "int i = get_global_id(0);",
-        "output[i] = f(input[i]);",
-      "}"))
+  def mapChunk[A,B](input: Chunk[A], functionBody: String, destructive: Boolean = false)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
+    val inplace = destructive && (input.size * clB.sizeOf <= input.space)
     val dimensions = Dimensions(1, Array(0), Array(input.size), null)
-    val handle: cl_mem = clCreateBuffer(context, 0, input.size*Sizeof.cl_double, null, null)
     val ready = new cl_event
     try {
-      callKernel(
-        program, "map",
-        KernelArg(input.handle) :: KernelArg(handle) :: Nil,
-        Array(input.ready),
-        dimensions,
-        ready
-      )
-      new Chunk(input.size, handle, ready)
+      if(inplace) {
+        val program = getProgram(Array(
+          """#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+        inline """, clB.clName, " f(", clA.clName, " x) {\n",
+          functionBody,
+        """}
+        __kernel __attribute__((vec_type_hint(""", clA.clName, """)))
+        void map(__global """, clA.clName, """ *input) {
+          int i = get_global_id(0);
+          input[i] = f(input[i]);
+        }"""))
+        callKernel(
+          program, "map",
+          KernelArg(input.handle) :: Nil,
+          Array(input.ready),
+          dimensions,
+          ready
+        )
+        new Chunk[B](input.size, input.space, input.handle, ready)
+      } else {
+        val program = getProgram(Array(
+          """#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+        inline """, clB.clName, " f(", clA.clName, " x) {\n",
+          functionBody,
+        """}
+        __kernel __attribute__((vec_type_hint(""", clA.clName, """)))
+        void map(__global """, clA.clName, " *input, __global ", clB.clName, """ *output) {
+          int i = get_global_id(0);
+          output[i] = f(input[i]);
+        }"""))
+        val handle: cl_mem = clCreateBuffer(context, 0, input.size*clB.sizeOf, null, null)
+        try {
+          callKernel(
+            program, "map",
+            KernelArg(input.handle) :: KernelArg(handle) :: Nil,
+            Array(input.ready),
+            dimensions,
+            ready
+          )
+          new Chunk[B](input.size, input.size*clB.sizeOf, handle, ready)
+        } finally {
+          clReleaseMemObject(handle)
+        }
+      }
     } finally {
       safeReleaseEvent(ready)
-      clReleaseMemObject(handle)
+      if(destructive)
+        input.close
     }
   }
 
@@ -386,13 +440,14 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * Put the contents of an iterator on the gpu in constant sized chunks (default 256MB size).
    * Chunks have to be closed after use
    */
-  def stream(it: Iterator[Double], groupSize: Int = 1024*1024*256) : Iterator[Chunk] = new Iterator[Chunk](){
+  def stream[@specialized(Double, Float, Int, Long) T](it: Iterator[T], groupSize: Int = 1024*1024*256)(implicit clT: CLType[T]) : Iterator[Chunk[T]] = new Iterator[Chunk[T]](){
     override def hasNext = it.hasNext
     override def next = {
       var on_device : Option[cl_mem] = None
       var on_host : Option[cl_mem] = None
       var unmapEvent = new cl_event
       var readyEvent: cl_event = null
+      var allocatedSize : Int = 0
       try {
         // Allocating direct buffers via ByteBuffer is prone to oom problems
         // it's faster anyway to refcount this
@@ -400,10 +455,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         on_host = Some(clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, groupSize, null, null))
         val rawBuffer = clEnqueueMapBuffer(queue, on_host.get, true, CL_MAP_WRITE_INVALIDATE_REGION, 0, groupSize, 0, null, null, null)
         log.trace("mapped buffer {}", on_host.get)
-        val buffer = rawBuffer.order(ByteOrder.nativeOrder).asDoubleBuffer
         var copied = 0
-        while(copied < groupSize/Sizeof.cl_double && it.hasNext) {
-          buffer.put(copied, it.next)
+        while(copied < groupSize/clT.sizeOf && it.hasNext) {
+          clT.toByteBuffer(copied, rawBuffer, it.next)
           copied += 1
         }
         log.trace("unmapping buffer {}", on_host.get)
@@ -414,12 +468,14 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
           readyEvent = unmapEvent
           unmapEvent = null
           on_host = None
+          allocatedSize = groupSize
         } else {
-          on_device = Some(clCreateBuffer(context, CL_MEM_READ_ONLY, copied*Sizeof.cl_double, null, null))
+          on_device = Some(clCreateBuffer(context, CL_MEM_READ_ONLY, copied*clT.sizeOf, null, null))
           readyEvent = new cl_event
-          clEnqueueCopyBuffer(queue, on_host.get, on_device.get, 0, 0, copied*Sizeof.cl_double, 1, Array(unmapEvent), readyEvent)
+          clEnqueueCopyBuffer(queue, on_host.get, on_device.get, 0, 0, copied*clT.sizeOf, 1, Array(unmapEvent), readyEvent)
+          allocatedSize = copied*clT.sizeOf
         }
-        Chunk(copied, on_device.get, readyEvent)
+        Chunk[T](copied, allocatedSize, on_device.get, readyEvent)
       } finally {
         safeReleaseEvent(readyEvent)
         safeReleaseEvent(unmapEvent)

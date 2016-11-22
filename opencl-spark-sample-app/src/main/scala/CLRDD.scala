@@ -19,7 +19,9 @@ class CLDoubleRDD (val wrapped: RDD[CLDoublePartition], val parentRDD: RDD[Doubl
 {
   override def compute(split: Partition, ctx: TaskContext) : Iterator[Double] = {
     val partition = wrapped.iterator(split, ctx)
-    partition.next.iterator(ctx)
+    val res = partition.next.iterator(ctx)
+    partition.hasNext //free spark datastructures
+    res
   }
 
   override protected def getPartitions : Array[Partition] = {
@@ -45,20 +47,20 @@ class CLDoubleRDD (val wrapped: RDD[CLDoublePartition], val parentRDD: RDD[Doubl
   }
 }
 
-trait CLPartition[T] {
+trait CLPartition[T] { self =>
   @transient protected var session : OpenCLSession = null
-  @transient protected var storage : Array[OpenCL.Chunk] = null
+  @transient protected var storage : Array[OpenCL.Chunk[T]] = null
   protected var doCache = false
-  protected def src : Iterator[OpenCL.Chunk]
-  def get : Iterator[OpenCL.Chunk] = {
+  protected def src : (OpenCLSession, Iterator[OpenCL.Chunk[T]])
+  def get : (OpenCLSession, Iterator[OpenCL.Chunk[T]]) = {
     if(doCache) {
       if(storage == null) {
-        session = OpenCL.get
-        storage = src.toArray
+        val res = src
+        session = res._1
+        storage = res._2.toArray
       }
-      storage.iterator
+      (session, storage.iterator)
     } else {
-      session = OpenCL.get
       src
     }
   }
@@ -70,16 +72,33 @@ trait CLPartition[T] {
       doCache = false
       storage.foreach(_.close)
       storage = null
+      session = null
     }
   }
   def sum(implicit evidence: T =:= Double) : Double = {
-    get.map(c => {
+    val (session, chunks) = get
+    chunks.map(chunk => {
       try {
-        session.reduceChunk(c, "0", "return x+y;")
+        session.reduceChunk[Double](chunk.asInstanceOf[OpenCL.Chunk[Double]], "", "0", "return x+y;")
       } finally {
-        if(!doCache) c.close
+        if(!doCache) chunk.close
       }
     }).foldLeft(0.0)({case (x,f) => x + f.get})
+  }
+  def map[B](functionBody: String)(implicit clA: CLType[T], clB: CLType[B]) : CLPartition[B] = {
+    new CLPartition[B](){
+      override def src = {
+        val (session, parentChunks) = self.get
+        val mappedChunks = parentChunks.map(c => {
+            if(self.doCache) {
+              session.mapChunk[T,B](c, functionBody, false)
+            } else {
+              session.mapChunk[T,B](c, functionBody, true)
+            }
+        })
+        (session, mappedChunks)
+      }
+    }
   }
 }
 
@@ -88,11 +107,13 @@ class CLDoublePartition (val parentPartition: Partition, val parentRDD: RDD[Doub
   extends CLPartition[Double]
 {
   lazy val log = LoggerFactory.getLogger(getClass)
-  override def src : Iterator[OpenCL.Chunk] = {
+  override def src : (OpenCLSession, Iterator[OpenCL.Chunk[Double]]) = {
     val ctx = TaskContext.get
-    session.stream(parentRDD.iterator(parentPartition, ctx))
+    val session = OpenCL.get
+    (session, session.stream(parentRDD.iterator(parentPartition, ctx)))
   }
   def iterator (ctx: TaskContext) : Iterator[Double] = {
-    get.flatMap(chunk => session.ChunkIterator(chunk))
+    val (session, chunks) = get
+    chunks.flatMap(chunk => session.ChunkIterator(chunk))
   }
 }
