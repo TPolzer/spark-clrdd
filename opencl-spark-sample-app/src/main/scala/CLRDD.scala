@@ -36,43 +36,31 @@ class CLDoubleRDD (val wrapped: RDD[CLDoublePartition], val parentRDD: RDD[Doubl
 
   def cacheGPU = {
     wrapped.foreach(_.cache)
+    this
   }
 
   def uncacheGPU = {
     wrapped.foreach(_.uncache)
+    this
   }
 }
 
-class CLDoublePartition (val parentPartition: Partition, val parentRDD: RDD[Double])
-{
-  @transient private var session : OpenCLSession = null
-  @transient private var storage : Seq[OpenCL.Chunk] = null
-  private var doCache = false
-  lazy val log = LoggerFactory.getLogger(getClass)
-  def copyOrGet (ctx: TaskContext) = {
-    if (doCache) {
+trait CLPartition[T] {
+  @transient protected var session : OpenCLSession = null
+  @transient protected var storage : Array[OpenCL.Chunk] = null
+  protected var doCache = false
+  protected def src : Iterator[OpenCL.Chunk]
+  def get : Iterator[OpenCL.Chunk] = {
+    if(doCache) {
       if(storage == null) {
         session = OpenCL.get
-        storage = session.stream(parentRDD.iterator(parentPartition, ctx)).toSeq
+        storage = src.toArray
       }
       storage.iterator
     } else {
       session = OpenCL.get
-      session.stream(parentRDD.iterator(parentPartition, ctx))
+      src
     }
-  }
-  def sum : Double = {
-    val ctx = TaskContext.get
-    copyOrGet(ctx).map(c => {
-      try {
-        session.reduceChunk(c, "0", "return x+y;")
-      } finally {
-        if(!doCache) c.close
-      }
-    }).foldLeft(0.0)({case (x,f) => x + f.get})
-  }
-  def iterator (ctx: TaskContext) : Iterator[Double] = {
-    copyOrGet(ctx).flatMap(chunk => session.ChunkIterator(chunk))
   }
   def cache = {
     doCache = true
@@ -83,5 +71,28 @@ class CLDoublePartition (val parentPartition: Partition, val parentRDD: RDD[Doub
       storage.foreach(_.close)
       storage = null
     }
+  }
+  def sum(implicit evidence: T =:= Double) : Double = {
+    get.map(c => {
+      try {
+        session.reduceChunk(c, "0", "return x+y;")
+      } finally {
+        if(!doCache) c.close
+      }
+    }).foldLeft(0.0)({case (x,f) => x + f.get})
+  }
+}
+
+
+class CLDoublePartition (val parentPartition: Partition, val parentRDD: RDD[Double])
+  extends CLPartition[Double]
+{
+  lazy val log = LoggerFactory.getLogger(getClass)
+  override def src : Iterator[OpenCL.Chunk] = {
+    val ctx = TaskContext.get
+    session.stream(parentRDD.iterator(parentPartition, ctx))
+  }
+  def iterator (ctx: TaskContext) : Iterator[Double] = {
+    get.flatMap(chunk => session.ChunkIterator(chunk))
   }
 }
