@@ -23,6 +23,10 @@ sourceSets {
 
 dependencies {
 	compile group:'org.jocl', name: 'jocl', version:'2.0.1-SNAPSHOT'
+
+	compile group: 'org.cache2k', name: 'cache2k-api', version: '0.28-BETA'
+	compile group: 'org.cache2k', name: 'cache2k-core', version: '0.28-BETA'
+
 	provided group:'org.apache.spark', name: 'spark-core_2.11', version: '2.0.0'
 }
 

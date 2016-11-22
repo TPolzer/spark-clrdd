@@ -1,10 +1,11 @@
 import org.apache.spark.rdd._
 import org.apache.spark._
+import org.slf4j.LoggerFactory
 import scala.collection.JavaConverters._
 
 object CLDoubleRDD
 {
-  lazy private val sc = SparkContext.getOrCreate
+  @transient lazy private val sc = SparkContext.getOrCreate
   def wrap(wrapped: RDD[Double]) = {
     val partitions = sc.broadcast(wrapped.partitions)
     val partitionsRDD = wrapped.mapPartitionsWithIndex( { case (idx: Int, _) =>
@@ -32,27 +33,55 @@ class CLDoubleRDD (val wrapped: RDD[CLDoublePartition], val parentRDD: RDD[Doubl
   def sum : Double = {
     wrapped.map(_.sum).sum
   }
+
+  def cacheGPU = {
+    wrapped.foreach(_.cache)
+  }
+
+  def uncacheGPU = {
+    wrapped.foreach(_.uncache)
+  }
 }
 
 class CLDoublePartition (val parentPartition: Partition, val parentRDD: RDD[Double])
 {
   @transient private var session : OpenCLSession = null
   @transient private var storage : Seq[OpenCL.Chunk] = null
+  private var doCache = false
+  lazy val log = LoggerFactory.getLogger(getClass)
   def copyOrGet (ctx: TaskContext) = {
-    if (storage == null) {
+    if (doCache) {
+      if(storage == null) {
+        session = OpenCL.get
+        storage = session.stream(parentRDD.iterator(parentPartition, ctx)).toSeq
+      }
+      storage.iterator
+    } else {
       session = OpenCL.get
-      storage = session.stream(parentRDD.iterator(parentPartition, ctx))
+      session.stream(parentRDD.iterator(parentPartition, ctx))
     }
-    storage
   }
   def sum : Double = {
     val ctx = TaskContext.get
-    copyOrGet(ctx).view.map(c => session.reduceChunk(c, "0", "return x+y;")).foldLeft(0.0)({case (x,f) => x + f.get})
+    copyOrGet(ctx).map(c => {
+      try {
+        session.reduceChunk(c, "0", "return x+y;")
+      } finally {
+        if(!doCache) c.close
+      }
+    }).foldLeft(0.0)({case (x,f) => x + f.get})
   }
   def iterator (ctx: TaskContext) : Iterator[Double] = {
-    copyOrGet(ctx).iterator.flatMap(chunk => session.ChunkIterator(chunk))
+    copyOrGet(ctx).flatMap(chunk => session.ChunkIterator(chunk))
   }
-  override def finalize : Unit = 
-    if(storage != null)
+  def cache = {
+    doCache = true
+  }
+  def uncache = {
+    if(storage != null) {
+      doCache = false
       storage.foreach(_.close)
+      storage = null
+    }
+  }
 }

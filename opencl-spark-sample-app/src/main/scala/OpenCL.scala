@@ -1,7 +1,13 @@
 import org.jocl.CL._
 import org.jocl._
+
+import org.cache2k.{Cache, Cache2kBuilder}
+import org.cache2k.integration.CacheLoader
+
 import org.slf4j.LoggerFactory
+
 import scala.collection.mutable.ArrayBuffer
+
 import java.util.HashMap
 import java.util.PrimitiveIterator
 import java.lang.ref.{ReferenceQueue, WeakReference}
@@ -44,7 +50,7 @@ object OpenCL
     })
   }
 
-  def safeReleaseEvent(e: cl_event) = if(e != new cl_event) clReleaseEvent(e)
+  def safeReleaseEvent(e: cl_event) = if(e != null && e != new cl_event) clReleaseEvent(e)
 
   override protected def initialValue = {
     val threadId = java.lang.Thread.currentThread.getId
@@ -77,13 +83,26 @@ object OpenCL
 
   case class Chunk (
     val size: Int, //bytes
-    val handle: cl_mem
+    var handle: cl_mem,
+    var ready: cl_event
   )
   extends java.io.Closeable
   {
     clRetainMemObject(handle)
+    clRetainEvent(ready)
     override def close : Unit = {
-      clReleaseMemObject(handle)
+      if(handle != null)
+        clReleaseMemObject(handle)
+      if(ready != null)
+        clReleaseEvent(ready)
+      handle = null
+      ready = null
+    }
+    override def finalize = {
+      if(handle != null) {
+        LoggerFactory.getLogger(getClass).warn("closing chunk {} on finalization", this)
+        close
+      }
     }
   }
 }
@@ -99,7 +118,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   {
     clRetainMemObject(chunk.handle)
     var ready = new cl_event
-    private var rawBuffer: Option[ByteBuffer] = Some(clEnqueueMapBuffer(queue, chunk.handle, false, CL_MAP_READ, 0, Sizeof.cl_double * chunk.size, 0, null, ready, null))
+    private var rawBuffer: Option[ByteBuffer] = Some(clEnqueueMapBuffer(queue, chunk.handle, false, CL_MAP_READ, 0, Sizeof.cl_double * chunk.size, 1, Array(chunk.ready), ready, null))
     val buffer = rawBuffer.get.order(ByteOrder.nativeOrder).asDoubleBuffer
     override def hasNext = {
       val res = (idx != chunk.size)
@@ -127,23 +146,21 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     override def finalize: Unit = close
   }
 
-  /*
-   * TODO: proper cache (discard old programs)?
-   * simple strategy would be to just periodically dump all entries (for
-   * CPU/GPU recompilation shouldn't be too expensive)
-   */
-  private val programCache = new ConcurrentHashMap[Seq[String],Program]
+  private val programCache = Cache2kBuilder.of(classOf[Seq[String]], classOf[Program])
+    .entryCapacity(20)
+    .loader(new CacheLoader[Seq[String],Program](){
+      override def load(source: Seq[String]) : Program = {
+        val program = clCreateProgramWithSource(context, source.size, source.toArray, null, null)
+        val res = Program(program) // finalize if buildProgram throws
+        clBuildProgram(res.program, 0, null, "-cl-unsafe-math-optimizations", null, null)
+        res
+      }
+    }).build
   /**
    * Build (or get from cache) an OpenCL program.
    */
   def getProgram(source: Seq[String]) : Program = {
-    Option(programCache.get(source)).orElse({
-        val program = clCreateProgramWithSource(context, source.size, source.toArray, null, null)
-        val res = Program(program) // finalize if buildProgram throws
-        clBuildProgram(res.program, 0, null, "-cl-unsafe-math-optimizations", null, null)
-        programCache.put(source, res)
-        Option(res)
-      }).get
+    programCache.get(source)
   }
 
   var executionTime = new AtomicLong
@@ -212,7 +229,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   lazy val a = new Array[Double](1024*1024*1024/Sizeof.cl_double)
   def test(m: Int) = {
     def time[A](a: => A) = { val now = System.nanoTime; val result = a; val micros = (System.nanoTime - now) / 1000; println("%f seconds".format(micros/1e6)); result};
-    def f(m: Int) = {val chunk: Seq[OpenCL.Chunk] = time(stream(a.iterator.take(1024*1024*m/Sizeof.cl_double),1024*1024*m)); clFinish(queue); println(time((1 to (1024*testSize/m)).map(i => reduceChunk(chunk(0), "0", "return x+y;")).foldLeft(0.0)({case (x,f) => x + f.get}))); chunk(0).close}
+    def f(m: Int) = {val chunk: Seq[OpenCL.Chunk] = time(stream(a.iterator.take(1024*1024*m/Sizeof.cl_double),1024*1024*m).toSeq); clFinish(queue); println(time((1 to (1024*testSize/m)).map(i => reduceChunk(chunk(0), "0", "return x+y;")).foldLeft(0.0)({case (x,f) => x + f.get}))); chunk(0).close}
     {var a = queueTime.get; var b = executionTime.get; f(m); a = queueTime.get - a; b = executionTime.get - b; println(s"execution: ${b/1e6}ms")}
   }
 
@@ -282,7 +299,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       callKernel(
         program, "reduce",
         KernelArg(input.handle) :: KernelArg(reduceBuffer.get) :: KernelArg(null, Sizeof.cl_double * localSize) :: KernelArg(input.size) :: Nil,
-        null,
+        Array(input.ready),
         Dimensions(1, Array(0), Array(globalSize), Array(localSize)),
         ready1
       )
@@ -332,20 +349,19 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       "}"))
     val dimensions = Dimensions(1, Array(0), Array(input.size), null)
     val handle: cl_mem = clCreateBuffer(context, 0, input.size*Sizeof.cl_double, null, null)
+    val ready = new cl_event
     try {
       callKernel(
         program, "map",
         KernelArg(input.handle) :: KernelArg(handle) :: Nil,
-        null,
+        Array(input.ready),
         dimensions,
-        null
+        ready
       )
-      new Chunk(input.size, handle)
-    } catch {
-      case e : Throwable => {
-        clReleaseMemObject(handle)
-        throw e
-      }
+      new Chunk(input.size, handle, ready)
+    } finally {
+      safeReleaseEvent(ready)
+      clReleaseMemObject(handle)
     }
   }
 
@@ -370,51 +386,45 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * Put the contents of an iterator on the gpu in constant sized chunks (default 256MB size).
    * Chunks have to be closed after use
    */
-  def stream(it: Iterator[Double], groupSize: Int = 1024*1024*256) : Seq[Chunk] = {
-    val res = new ArrayBuffer[Chunk]
-    try {
-      while(it.hasNext) {
-        var on_device : Option[cl_mem] = None
-        var on_host : Option[cl_mem] = None
-        val unmapEvent = new cl_event
-        try {
-          // Allocating direct buffers via ByteBuffer is prone to oom problems
-          // it's faster anyway to refcount this
-          //val rawBuffer = ByteBuffer.allocateDirect(groupSize)
-          on_host = Some(clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, groupSize, null, null))
-          val rawBuffer = clEnqueueMapBuffer(queue, on_host.get, true, CL_MAP_WRITE, 0, groupSize, 0, null, null, null)
-          log.trace("mapped buffer {}", on_host.get)
-          val buffer = rawBuffer.order(ByteOrder.nativeOrder).asDoubleBuffer
-          var copied = 0
-          while(copied < groupSize/Sizeof.cl_double && it.hasNext) {
-            if(copied % 100000 == 0)
-              log.trace("copied {} to {}", copied, on_host.get)
-            buffer.put(copied, it.next)
-            copied += 1
-          }
-          log.trace("unmapping buffer {}", on_host.get)
-          clEnqueueUnmapMemObject(queue, on_host.get, rawBuffer, 0, null, unmapEvent)
-          
-          if(ALLOC_HOST_PTR_ON_DEVICE) {
-            on_device = on_host
-            on_host = None
-          } else {
-            on_device = Some(clCreateBuffer(context, CL_MEM_READ_ONLY, copied*Sizeof.cl_double, null, null))
-            clEnqueueCopyBuffer(queue, on_host.get, on_device.get, 0, 0, copied*Sizeof.cl_double, 1, Array(unmapEvent), null)
-          }
-          res += Chunk(copied, on_device.get)
-        } finally {
-          on_device.foreach(clReleaseMemObject)
-          on_host.foreach(clReleaseMemObject)
-          safeReleaseEvent(unmapEvent)
+  def stream(it: Iterator[Double], groupSize: Int = 1024*1024*256) : Iterator[Chunk] = new Iterator[Chunk](){
+    override def hasNext = it.hasNext
+    override def next = {
+      var on_device : Option[cl_mem] = None
+      var on_host : Option[cl_mem] = None
+      var unmapEvent = new cl_event
+      var readyEvent: cl_event = null
+      try {
+        // Allocating direct buffers via ByteBuffer is prone to oom problems
+        // it's faster anyway to refcount this
+        //val rawBuffer = ByteBuffer.allocateDirect(groupSize)
+        on_host = Some(clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, groupSize, null, null))
+        val rawBuffer = clEnqueueMapBuffer(queue, on_host.get, true, CL_MAP_WRITE_INVALIDATE_REGION, 0, groupSize, 0, null, null, null)
+        log.trace("mapped buffer {}", on_host.get)
+        val buffer = rawBuffer.order(ByteOrder.nativeOrder).asDoubleBuffer
+        var copied = 0
+        while(copied < groupSize/Sizeof.cl_double && it.hasNext) {
+          buffer.put(copied, it.next)
+          copied += 1
         }
-      }
-      clEnqueueBarrierWithWaitList(queue, 0, null, null)
-      res
-    } catch {
-      case e:Throwable => {
-        res.foreach(_.close)
-        throw e
+        log.trace("unmapping buffer {}", on_host.get)
+        clEnqueueUnmapMemObject(queue, on_host.get, rawBuffer, 0, null, unmapEvent)
+
+        if(ALLOC_HOST_PTR_ON_DEVICE) {
+          on_device = on_host
+          readyEvent = unmapEvent
+          unmapEvent = null
+          on_host = None
+        } else {
+          on_device = Some(clCreateBuffer(context, CL_MEM_READ_ONLY, copied*Sizeof.cl_double, null, null))
+          readyEvent = new cl_event
+          clEnqueueCopyBuffer(queue, on_host.get, on_device.get, 0, 0, copied*Sizeof.cl_double, 1, Array(unmapEvent), readyEvent)
+        }
+        Chunk(copied, on_device.get, readyEvent)
+      } finally {
+        safeReleaseEvent(readyEvent)
+        safeReleaseEvent(unmapEvent)
+        on_host.foreach(clReleaseMemObject)
+        on_device.foreach(clReleaseMemObject)
       }
     }
   }
