@@ -432,7 +432,10 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
      */
     val buffer = Array(0)
     clGetDeviceInfo(device, CL_DEVICE_HOST_UNIFIED_MEMORY, Sizeof.cl_int, Pointer.to(buffer), null)
-    val res = buffer(0) != 0
+    val vendorBuffer = new Array[Byte](1024)
+    clGetDeviceInfo(device, CL_DEVICE_VENDOR, 1024, Pointer.to(vendorBuffer), null)
+    val vendor = new String(vendorBuffer, "UTF-8")
+    val res = (buffer(0) != 0) || vendor.toLowerCase.matches(".*nvidia.*")
     log.info(s"${if (!res) "not " else ""}using unified memory")
     res
   }
