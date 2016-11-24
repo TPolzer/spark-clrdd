@@ -387,7 +387,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * @param destructive if true, mapping is done in place if possible
    */
   def mapChunk[A,B](input: Chunk[A], functionBody: String, destructive: Boolean = false)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
-    val inplace = destructive && (input.size * clB.sizeOf <= input.space)
+    //could be done in place even if sizes dont line up, but with a lot more complex code
+    val inplace = destructive && (clA.sizeOf == clB.sizeOf)
     val dimensions = Dimensions(1, Array(0), Array(input.size), null)
     val ready = new cl_event
     try {
@@ -398,9 +399,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
           functionBody,
         """}
         __kernel __attribute__((vec_type_hint(""", clA.clName, """)))
-        void map(__global """, clA.clName, """ *input) {
+        void map(__global """, clB.clName, """ *input) {
           int i = get_global_id(0);
-          input[i] = f(input[i]);
+          input[i] = f(as_""", clA.clName,"""(input[i]));
         }"""))
         callKernel(
           program, "map",
