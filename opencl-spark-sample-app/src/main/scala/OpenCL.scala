@@ -7,11 +7,14 @@ import org.cache2k.integration.CacheLoader
 import org.slf4j.LoggerFactory
 
 import scala.collection.mutable.ArrayBuffer
+import scala.concurrent.{Future, Promise}
+
+import scala.math.Numeric
+import scala.math.Ordering
 
 import java.util.HashMap
 import java.util.PrimitiveIterator
 import java.lang.ref.{ReferenceQueue, WeakReference}
-import java.util.concurrent.{Future, CompletableFuture, ConcurrentHashMap}
 import java.util.concurrent.atomic.AtomicLong
 import java.nio.ByteOrder
 import java.nio.ByteBuffer
@@ -109,8 +112,9 @@ object OpenCL
 }
 
 object CLType {
-  implicit object CLDouble extends CLType[Double] {
+  trait CLDouble extends CLType[Double] {
     override val clName = "double"
+    override val zeroName = "0.0"
     override val sizeOf = Sizeof.cl_double
     override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
       rawBuffer.order(ByteOrder.nativeOrder).getDouble(idx * sizeOf)
@@ -119,8 +123,22 @@ object CLType {
       rawBuffer.order(ByteOrder.nativeOrder).putDouble(idx * sizeOf, v)
     }
   }
-  implicit object CLInt extends CLType[Int] {
+  implicit object CLDouble extends CLDouble with Numeric.DoubleIsConflicted with Ordering.DoubleOrdering
+  trait CLLong extends CLType[Long] {
+    override val clName = "long"
+    override val zeroName = "0L"
+    override val sizeOf = Sizeof.cl_long
+    override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
+      rawBuffer.order(ByteOrder.nativeOrder).getLong(idx * sizeOf)
+    }
+    override def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: Long) = {
+      rawBuffer.order(ByteOrder.nativeOrder).putLong(idx * sizeOf, v)
+    }
+  }
+  implicit object CLLong extends CLLong with Numeric.LongIsIntegral with Ordering.LongOrdering
+  trait CLInt extends CLType[Int] {
     override val clName = "int"
+    override val zeroName = "0"
     override val sizeOf = Sizeof.cl_int
     override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
       rawBuffer.order(ByteOrder.nativeOrder).getInt(idx * sizeOf)
@@ -129,12 +147,14 @@ object CLType {
       rawBuffer.order(ByteOrder.nativeOrder).putInt(idx * sizeOf, v)
     }
   }
+  implicit object CLInt extends CLInt with Numeric.IntIsIntegral with Ordering.IntOrdering
 }
 
-trait CLType[@specialized(Double, Float, Int, Long) T] {
+trait CLType[@specialized(Double, Float, Int, Long) T] extends Numeric[T] {
   val clName: String
   val sizeOf: Int
   val header: String = ""
+  val zeroName: String
   def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer): T
   def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: T): Unit
 }
@@ -148,19 +168,21 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   case class ChunkIterator[@specialized(Double, Float, Int, Long) T](chunk: Chunk[T])(implicit clT: CLType[T])
     extends Iterator[T] with java.io.Closeable
   {
-    clRetainMemObject(chunk.handle)
-    var ready = new cl_event
-    private var rawBuffer: Option[ByteBuffer] = Some(clEnqueueMapBuffer(queue, chunk.handle, false, CL_MAP_READ, 0, Sizeof.cl_double * chunk.size, 1, Array(chunk.ready), ready, null))
+    private val Chunk(elems, _, handle, inputReady) = chunk
+    clRetainMemObject(handle)
+    var outputReady = new cl_event
+    private var rawBuffer: Option[ByteBuffer] = Some(clEnqueueMapBuffer(queue, handle, false, CL_MAP_READ, 0, Sizeof.cl_double * elems, 1, Array(inputReady), outputReady, null))
     override def hasNext = {
-      val res = (idx != chunk.size)
+      val res = (idx != elems)
       if(!res)
         close
       res
     }
     override def next = {
-      if(ready != new cl_event) {
-        clWaitForEvents(1, Array(ready))
-        ready = new cl_event
+      if(outputReady != new cl_event) {
+        clWaitForEvents(1, Array(outputReady))
+        safeReleaseEvent(outputReady)
+        outputReady = new cl_event
       }
       idx += 1
       clT.fromByteBuffer(idx-1, rawBuffer.get)
@@ -168,9 +190,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     private var idx = 0
     override def close : Unit = {
       rawBuffer.foreach(b => {
-        clEnqueueUnmapMemObject(queue, chunk.handle, b, 0, null, null)
-        clReleaseMemObject(chunk.handle)
-        safeReleaseEvent(ready)
+        clEnqueueUnmapMemObject(queue, handle, b, 0, null, null)
+        clReleaseMemObject(handle)
+        safeReleaseEvent(outputReady)
       })
       rawBuffer = None
     }
@@ -336,12 +358,13 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         Dimensions(1, Array(0), Array(localSize), Array(localSize)),
         ready2
       )
-      val future = new CompletableFuture[T]
+      val promise = Promise[T]
+      val future = promise.future
       val result = clEnqueueMapBuffer(queue, resBuffer.get, false, CL_MAP_READ, 0, clT.sizeOf, 1, Array(ready2), finished, null)
       clSetEventCallback(finished, CL_COMPLETE, new EventCallbackFunction(){
         clRetainMemObject(resBuffer.get)
         override def function(event: cl_event, command_exec_callback_type: Int, user_data: AnyRef): Unit = {
-          future.complete(clT.fromByteBuffer(0, result))
+          promise.success(clT.fromByteBuffer(0, result))
           clEnqueueUnmapMemObject(queue, resBuffer.get, result, 0, null, null)
           clReleaseMemObject(resBuffer.get)
         }
@@ -443,7 +466,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * Put the contents of an iterator on the gpu in constant sized chunks (default 256MB size).
    * Chunks have to be closed after use
    */
-  def stream[@specialized(Double, Float, Int, Long) T](it: Iterator[T], groupSize: Int = 1024*1024*256)(implicit clT: CLType[T]) : Iterator[Chunk[T]] = new Iterator[Chunk[T]](){
+  def stream[@specialized(Double, Float, Int, Long) T](it: Iterator[T], groupSize: Int = 1024*1024*64)(implicit clT: CLType[T]) : Iterator[Chunk[T]] = new Iterator[Chunk[T]](){
     override def hasNext = it.hasNext
     override def next = {
       var on_device : Option[cl_mem] = None
