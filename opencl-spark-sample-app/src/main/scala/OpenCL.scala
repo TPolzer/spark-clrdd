@@ -112,6 +112,18 @@ object OpenCL
 }
 
 object CLType {
+  trait CLFloat extends CLType[Float] {
+    override val clName = "float"
+    override val zeroName = "0.0"
+    override val sizeOf = Sizeof.cl_float
+    override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
+      rawBuffer.order(ByteOrder.nativeOrder).getFloat(idx * sizeOf)
+    }
+    override def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: Float) = {
+      rawBuffer.order(ByteOrder.nativeOrder).putFloat(idx * sizeOf, v)
+    }
+  }
+  implicit object CLFloat extends CLFloat with Numeric.FloatIsConflicted with Ordering.FloatOrdering
   trait CLDouble extends CLType[Double] {
     override val clName = "double"
     override val zeroName = "0.0"
