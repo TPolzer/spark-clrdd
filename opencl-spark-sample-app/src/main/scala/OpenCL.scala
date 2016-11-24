@@ -183,7 +183,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     private val Chunk(elems, _, handle, inputReady) = chunk
     clRetainMemObject(handle)
     var outputReady = new cl_event
-    private var rawBuffer: Option[ByteBuffer] = Some(clEnqueueMapBuffer(queue, handle, false, CL_MAP_READ, 0, Sizeof.cl_double * elems, 1, Array(inputReady), outputReady, null))
+    private var rawBuffer: Option[ByteBuffer] = Some(clEnqueueMapBuffer(queue, handle, false, CL_MAP_READ, 0, clT.sizeOf * elems, 1, Array(inputReady), outputReady, null))
     override def hasNext = {
       val res = (idx != elems)
       if(!res)
