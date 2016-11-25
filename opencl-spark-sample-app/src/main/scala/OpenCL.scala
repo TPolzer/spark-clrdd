@@ -162,7 +162,7 @@ object CLType {
   implicit object CLInt extends CLInt with Numeric.IntIsIntegral with Ordering.IntOrdering
 }
 
-trait CLType[@specialized(Double, Float, Int, Long) T] extends Numeric[T] {
+trait CLType[T] extends Numeric[T] {
   val clName: String
   val sizeOf: Int
   val header: String = ""
@@ -177,7 +177,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   val log = LoggerFactory.getLogger(getClass)
   log.info("created OpenCLSession")
 
-  case class ChunkIterator[@specialized(Double, Float, Int, Long) T](chunk: Chunk[T])(implicit clT: CLType[T])
+  case class ChunkIterator[T](chunk: Chunk[T])(implicit clT: CLType[T])
     extends Iterator[T] with java.io.Closeable
   {
     private val Chunk(elems, _, handle, inputReady) = chunk
@@ -479,7 +479,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * Put the contents of an iterator on the gpu in constant sized chunks (default 128MB size).
    * Chunks have to be closed after use
    */
-  def stream[@specialized(Double, Float, Int, Long) T](it: Iterator[T], groupSize: Int = 1024*1024*128)(implicit clT: CLType[T]) : Iterator[Chunk[T]] = new Iterator[Chunk[T]](){
+  def stream[T](it: Iterator[T], groupSize: Int = 1024*1024*128)(implicit clT: CLType[T]) : Iterator[Chunk[T]] = new Iterator[Chunk[T]](){
     override def hasNext = it.hasNext
     override def next = {
       var on_device : Option[cl_mem] = None
