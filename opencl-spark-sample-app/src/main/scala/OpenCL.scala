@@ -242,7 +242,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         val started = profiling(0)
         clGetEventProfilingInfo(ready, CL_PROFILING_COMMAND_END, Sizeof.cl_ulong, Pointer.to(profiling), null)
         val ended = profiling(0)
-        log.trace("kernel took {}ms", (ended-started)/1e6)
+        log.trace("kernel {} took {}ms", ready, (ended-started)/1e6)
         queueTime.addAndGet(ended - queued)
         executionTime.addAndGet(ended - started)
       } finally safeReleaseEvent(ready)
@@ -273,7 +273,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         dependencies,
         ready
       )
-      log.trace("clEnqueueNDRangeKernel took {}ms", (System.nanoTime - enTime)/1e6)
+      log.trace("clEnqueueNDRangeKernel {} took {}ms", ready, (System.nanoTime - enTime)/1e6)
 
       clSetEventCallback(ready, CL_COMPLETE, new ProfilingCallback(ready), null)
 
@@ -476,10 +476,10 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     res
   }
   /**
-   * Put the contents of an iterator on the gpu in constant sized chunks (default 256MB size).
+   * Put the contents of an iterator on the gpu in constant sized chunks (default 128MB size).
    * Chunks have to be closed after use
    */
-  def stream[@specialized(Double, Float, Int, Long) T](it: Iterator[T], groupSize: Int = 1024*1024*64)(implicit clT: CLType[T]) : Iterator[Chunk[T]] = new Iterator[Chunk[T]](){
+  def stream[@specialized(Double, Float, Int, Long) T](it: Iterator[T], groupSize: Int = 1024*1024*128)(implicit clT: CLType[T]) : Iterator[Chunk[T]] = new Iterator[Chunk[T]](){
     override def hasNext = it.hasNext
     override def next = {
       var on_device : Option[cl_mem] = None
