@@ -38,6 +38,10 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
     Array(new OneToOneDependency(wrapped), new OneToOneDependency(parentRDD))
   }
 
+  def to[B : CLType : ClassTag] : CLRDD[B] = {
+    new CLRDD(wrapped.map(_.map[B]("return x;")), parentRDD)
+  }
+
   def map[B : CLType : ClassTag](functionBody: String) : CLRDD[B] = {
     new CLRDD(wrapped.map(_.map[B](functionBody)), parentRDD)
   }

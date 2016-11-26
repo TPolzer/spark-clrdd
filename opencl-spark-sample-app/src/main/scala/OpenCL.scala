@@ -39,13 +39,31 @@ object OpenCL
         val devices = new Array[cl_device_id](numDevices(0))
         clGetDeviceIDs(platform, deviceType, numDevices(0), devices, null)
         devices.flatMap(device => {
-          try{
-            val context = clCreateContext(contextProperties, 1, Array(device), null, null, null)
-            val queue = clCreateCommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, null) //deprecated for OpenCL 2.0, needed for 1.2!
-            Some(new OpenCLSession(context, queue, device))
-          } catch {
-            case e: CLException => None
-          }
+          (try {
+            val maxComputeUnits = Array(0)
+            clGetDeviceInfo(device, CL_DEVICE_MAX_COMPUTE_UNITS, 4, Pointer.to(maxComputeUnits), null)
+            var partitionSize = maxComputeUnits(0)
+            for(i <- ((maxComputeUnits(0)+15)/16 to maxComputeUnits(0)-1).reverse) {
+              if(maxComputeUnits(0) % i == 0)
+                partitionSize = i
+            }
+            val splitProperties = new cl_device_partition_property
+            splitProperties.addProperty(CL_DEVICE_PARTITION_EQUALLY, partitionSize)
+            clCreateSubDevices(device, splitProperties, 0, null, numDevices)
+            val devices = new Array[cl_device_id](numDevices(0))
+            clCreateSubDevices(device, splitProperties, devices.size, devices, null)
+            devices
+          } catch { case e: CLException =>
+            Array(device)
+          }).flatMap(device => {
+            try{
+              val context = clCreateContext(contextProperties, 1, Array(device), null, null, null)
+              val queue = clCreateCommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, null) //deprecated for OpenCL 2.0, needed for 1.2!
+              Some(new OpenCLSession(context, queue, device))
+            } catch {
+              case e: CLException => None
+            }
+          })
         })
       } catch {
         case e: CLException => Nil
