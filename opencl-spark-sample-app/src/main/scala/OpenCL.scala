@@ -302,16 +302,15 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       """}
       __kernel
       __attribute__((vec_type_hint(""", elemType, """)))
+      __attribute__((reqd_work_group_size(1, 1, 1)))
       void reduce(__global """, elemType, """ *input, __global """, elemType, """ *output, __local """, elemType, """ *scratch, int size) {
-        if(get_global_id(0) == 0) {
-          """, elemType, """ cur = """, identityElement, """;
-          for(int i=0; i<size; ++i) {
-            cur  = f(cur, input[i]);
-          }
-          output[0] = cur;
-        } else if(get_local_id(0) == 0) {
-          output[get_group_id(0)] = """, identityElement, """;
+        """, elemType, """ cur = """, identityElement, """;
+        output[get_group_id(0)] = cur;
+        if(get_group_id(0) != 0) return;
+        for(int i=0; i<size; i++) {
+          cur  = f(cur, input[i]);
         }
+        output[get_group_id(0)] = cur;
         return;
       }"""))
     else
@@ -475,6 +474,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     log.info(s"${if (!res) "not " else ""}using unified memory")
     res
   }
+
   /**
    * Put the contents of an iterator on the gpu in constant sized chunks (default 128MB size).
    * Chunks have to be closed after use
