@@ -37,13 +37,15 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     private var mappedOffset = 0L
     private var idx = 0L
     private def ensureMapped(idx: Long)(implicit clT: CLType[T]) = {
-      val maxMapSize = 1024L*1024*1024
-      if(rawBuffer.isEmpty || idx < mappedOffset || mappedOffset + maxMapSize <= idx) {
+      val maxMapSize = 1024L*1024*64 // implicit assumption is that all value sizes divide this size
+      val address = idx * clT.sizeOf
+      if(rawBuffer.isEmpty || address < mappedOffset || mappedOffset + maxMapSize <= address) {
         unmap()
-        mappedOffset = idx / maxMapSize * maxMapSize
+        mappedOffset = address / maxMapSize * maxMapSize
         val mapSize = Math.min(maxMapSize, clT.sizeOf * elems)
         outputReady = new cl_event
-        rawBuffer = Some(clEnqueueMapBuffer(queue, handle, false, CL_MAP_READ, mappedOffset, clT.sizeOf * elems, 1, Array(inputReady), outputReady, null))
+        log.trace("mapping {} for iteration at offset {}, size {}", handle, mappedOffset.asInstanceOf[AnyRef], mapSize.asInstanceOf[AnyRef])
+        rawBuffer = Some(clEnqueueMapBuffer(queue, handle, false, CL_MAP_READ, mappedOffset, mapSize, 1, Array(inputReady), outputReady, null))
       }
     }
     override def hasNext = {
@@ -60,7 +62,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         outputReady = new cl_event
       }
       idx += 1
-      clT.fromByteBuffer((idx-1-mappedOffset).toInt, rawBuffer.get)
+      clT.fromByteBuffer((idx-1-mappedOffset/clT.sizeOf).toInt, rawBuffer.get)
     }
     private def unmap() : Unit = {
       rawBuffer.foreach(b => {
@@ -102,7 +104,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     var kernel : Option[cl_kernel] = None
     try {
       kernel = Some(clCreateKernel(program.program, kernelName, null))
-      log.info("createKernel took {}ms", (System.nanoTime - startTime)/1e6)
+      log.trace("createKernel took {}ms", (System.nanoTime - startTime)/1e6)
 
       var index = 0
       val argTime = System.nanoTime
