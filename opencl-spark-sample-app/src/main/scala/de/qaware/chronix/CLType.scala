@@ -4,17 +4,22 @@ import org.jocl._
 import java.nio.ByteOrder
 import java.nio.ByteBuffer
 
-trait CLType[T] extends Numeric[T] {
+trait CLType[T] {
   val clName: String
   val sizeOf: Int
   val header: String = ""
-  val zeroName: String
+  lazy val getter: String = s"return as_$clName(vload$sizeOf(i, buffer));"
+  lazy val setter: String = s"vstore$sizeOf(as_char$sizeOf(v), i, buffer);"
   def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer): T
   def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: T): Unit
 }
 
+trait CLNumeric[T] extends CLType[T] with Numeric[T] {
+  val zeroName: String
+}
+
 object CLType {
-  trait CLFloat extends CLType[Float] {
+  trait CLFloat extends CLNumeric[Float] {
     override val clName = "float"
     override val zeroName = "0.0"
     override val sizeOf = Sizeof.cl_float
@@ -26,7 +31,7 @@ object CLType {
     }
   }
   implicit object CLFloat extends CLFloat with Numeric.FloatIsConflicted with Ordering.FloatOrdering
-  trait CLDouble extends CLType[Double] {
+  trait CLDouble extends CLNumeric[Double] {
     override val clName = "double"
     override val zeroName = "0.0"
     override val sizeOf = Sizeof.cl_double
@@ -38,7 +43,7 @@ object CLType {
     }
   }
   implicit object CLDouble extends CLDouble with Numeric.DoubleIsConflicted with Ordering.DoubleOrdering
-  trait CLLong extends CLType[Long] {
+  trait CLLong extends CLNumeric[Long] {
     override val clName = "long"
     override val zeroName = "0L"
     override val sizeOf = Sizeof.cl_long
@@ -50,7 +55,7 @@ object CLType {
     }
   }
   implicit object CLLong extends CLLong with Numeric.LongIsIntegral with Ordering.LongOrdering
-  trait CLInt extends CLType[Int] {
+  trait CLInt extends CLNumeric[Int] {
     override val clName = "int"
     override val zeroName = "0"
     override val sizeOf = Sizeof.cl_int

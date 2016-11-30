@@ -52,7 +52,7 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
     wrapped.map(_.count).fold(0L)(_+_)
   }
   
-  def sum(implicit num: Numeric[T]) : T = {
+  def sum(implicit num: CLNumeric[T]) : T = {
     wrapped.map(_.sum).reduce(num.plus(_, _))
   }
 
@@ -108,7 +108,7 @@ trait CLPartition[T] { self =>
       session = null
     }
   }
-  def sum(implicit clT: CLType[T]) : T = {
+  def sum(implicit clT: CLNumeric[T]) : T = {
     val (session, chunks) = get
     val future = chunks.map(chunk => {
       try {

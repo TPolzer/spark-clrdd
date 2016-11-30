@@ -88,6 +88,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       override def load(source: Seq[String]) : Program = {
         val program = clCreateProgramWithSource(context, source.size, source.toArray, null, null)
         val res = Program(program) // finalize if buildProgram throws
+        import org.apache.commons.lang.builder.ReflectionToStringBuilder
+        if(log.isInfoEnabled)
+          log.info("building program: {}", source.flatten)
         clBuildProgram(res.program, 0, null, "-cl-unsafe-math-optimizations", null, null)
         res
       }
@@ -253,16 +256,24 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     val dimensions = Dimensions(1, Array(0), Array(input.size), null)
     val ready = new cl_event
     try {
-      if(inplace) {
-        val program = getProgram(Array(
+      val commonText = Array(
           """#pragma OPENCL EXTENSION cl_khr_fp64 : enable
         inline """, clB.clName, " f(", clA.clName, " x) {\n",
           functionBody,
         """}
-        __kernel __attribute__((vec_type_hint(""", clA.clName, """)))
-        void map(__global """, clB.clName, """ *input) {
+        inline """, clA.clName, " getB(__global char *buffer, long i) {\n",
+          clA.getter,
+        """}
+        inline void setA(""", clB.clName, " v, __global char *buffer, long i) {\n",
+          clB.setter,
+        "}"
+      )
+      if(inplace) {
+        val program = getProgram(commonText ++ Array(
+        "__kernel __attribute__((vec_type_hint(", clA.clName, """)))
+        void map(__global char *input) {
           long i = get_global_id(0);
-          input[i] = f(as_""", clA.clName,"""(input[i]));
+          setA(f(getB(input, i)), input, i);
         }"""))
         callKernel(
           program, "map",
@@ -273,15 +284,11 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         )
         new Chunk[B](input.size, input.space, input.handle, ready)
       } else {
-        val program = getProgram(Array(
-          """#pragma OPENCL EXTENSION cl_khr_fp64 : enable
-        inline """, clB.clName, " f(", clA.clName, " x) {\n",
-          functionBody,
-        """}
-        __kernel __attribute__((vec_type_hint(""", clA.clName, """)))
-        void map(__global """, clA.clName, " *input, __global ", clB.clName, """ *output) {
+        val program = getProgram(commonText ++ Array(
+        "__kernel __attribute__((vec_type_hint(", clA.clName, """)))
+        void map(__global char *input, __global cha *output) {
           long i = get_global_id(0);
-          output[i] = f(input[i]);
+          setA(f(getB(input, i)), output, i);
         }"""))
         val handle: cl_mem = clCreateBuffer(context, 0, input.size*clB.sizeOf, null, null)
         try {
