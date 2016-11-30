@@ -1,3 +1,5 @@
+package de.qaware.chronix
+
 import org.jocl.CL._
 import org.jocl._
 
@@ -16,183 +18,13 @@ import java.util.HashMap
 import java.util.PrimitiveIterator
 import java.lang.ref.{ReferenceQueue, WeakReference}
 import java.util.concurrent.atomic.AtomicLong
-import java.nio.ByteOrder
 import java.nio.ByteBuffer
-
-object OpenCL
-  extends java.lang.ThreadLocal[OpenCLSession] // supplies one OpenCLSession per device, round-robin over threads
-{
-  setExceptionsEnabled(true)
-  var CPU = false
-  lazy val deviceType = if(CPU) CL_DEVICE_TYPE_CPU else CL_DEVICE_TYPE_GPU
-  lazy val devices = { // holds one session for each device
-    val numPlatforms = Array(0)
-    clGetPlatformIDs(0, null, numPlatforms)
-    val platforms = new Array[cl_platform_id](numPlatforms(0))
-    clGetPlatformIDs(platforms.length, platforms, null)
-    platforms.flatMap(platform => {
-      try {
-        val contextProperties = new cl_context_properties
-        contextProperties.addProperty(CL_CONTEXT_PLATFORM, platform)
-        val numDevices = Array(0)
-        clGetDeviceIDs(platform, deviceType, 0, null, numDevices)
-        val devices = new Array[cl_device_id](numDevices(0))
-        clGetDeviceIDs(platform, deviceType, numDevices(0), devices, null)
-        devices.flatMap(device => {
-          (try {
-            val maxComputeUnits = Array(0)
-            clGetDeviceInfo(device, CL_DEVICE_MAX_COMPUTE_UNITS, 4, Pointer.to(maxComputeUnits), null)
-            var partitionSize = maxComputeUnits(0)
-            for(i <- ((maxComputeUnits(0)+15)/16 to maxComputeUnits(0)-1).reverse) {
-              if(maxComputeUnits(0) % i == 0)
-                partitionSize = i
-            }
-            val splitProperties = new cl_device_partition_property
-            splitProperties.addProperty(CL_DEVICE_PARTITION_EQUALLY, partitionSize)
-            clCreateSubDevices(device, splitProperties, 0, null, numDevices)
-            val devices = new Array[cl_device_id](numDevices(0))
-            clCreateSubDevices(device, splitProperties, devices.size, devices, null)
-            devices
-          } catch { case e: CLException =>
-            Array(device)
-          }).flatMap(device => {
-            try{
-              val context = clCreateContext(contextProperties, 1, Array(device), null, null, null)
-              val queue = clCreateCommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, null) //deprecated for OpenCL 2.0, needed for 1.2!
-              Some(new OpenCLSession(context, queue, device))
-            } catch {
-              case e: CLException => None
-            }
-          })
-        })
-      } catch {
-        case e: CLException => Nil
-      }
-    })
-  }
-
-  def safeReleaseEvent(e: cl_event) = if(e != null && e != new cl_event) clReleaseEvent(e)
-
-  override protected def initialValue = {
-    val threadId = java.lang.Thread.currentThread.getId
-    devices((threadId % devices.size.toLong).toInt)
-  }
-
-  /**
-   * A finalizing holder for cl_program. `program` will be released upon finalization!
-   */
-  case class Program (program: cl_program) {
-    override def finalize : Unit = {
-      LoggerFactory.getLogger(getClass).info("automatically releasing " + program)
-      clReleaseProgram(program)
-    }
-  }
-
-  case class KernelArg (value: Pointer, size: Long)
-  object KernelArg {
-    def apply(mem: cl_mem) : KernelArg = KernelArg(Pointer.to(mem), Sizeof.cl_mem)
-    def apply(i: Int) : KernelArg = KernelArg(Pointer.to(Array(i)), Sizeof.cl_int)
-  }
-
-  case class Dimensions (
-    dim: Int,
-    global_work_offset: Array[Long],
-    global_work_size: Array[Long],
-    local_work_size: Array[Long]
-  ) {
-  }
-
-  case class Chunk[T] (
-    val size: Int, //used elements
-    val space: Int, //allocated size in bytes
-    var handle: cl_mem,
-    var ready: cl_event
-  )
-  extends java.io.Closeable
-  {
-    clRetainMemObject(handle)
-    clRetainEvent(ready)
-    override def close : Unit = {
-      if(handle != null)
-        clReleaseMemObject(handle)
-      if(ready != null)
-        clReleaseEvent(ready)
-      handle = null
-      ready = null
-    }
-    override def finalize = {
-      if(handle != null) {
-        LoggerFactory.getLogger(getClass).warn("closing chunk {} on finalization", this)
-        close
-      }
-    }
-  }
-}
-
-object CLType {
-  trait CLFloat extends CLType[Float] {
-    override val clName = "float"
-    override val zeroName = "0.0"
-    override val sizeOf = Sizeof.cl_float
-    override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
-      rawBuffer.order(ByteOrder.nativeOrder).getFloat(idx * sizeOf)
-    }
-    override def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: Float) = {
-      rawBuffer.order(ByteOrder.nativeOrder).putFloat(idx * sizeOf, v)
-    }
-  }
-  implicit object CLFloat extends CLFloat with Numeric.FloatIsConflicted with Ordering.FloatOrdering
-  trait CLDouble extends CLType[Double] {
-    override val clName = "double"
-    override val zeroName = "0.0"
-    override val sizeOf = Sizeof.cl_double
-    override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
-      rawBuffer.order(ByteOrder.nativeOrder).getDouble(idx * sizeOf)
-    }
-    override def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: Double) = {
-      rawBuffer.order(ByteOrder.nativeOrder).putDouble(idx * sizeOf, v)
-    }
-  }
-  implicit object CLDouble extends CLDouble with Numeric.DoubleIsConflicted with Ordering.DoubleOrdering
-  trait CLLong extends CLType[Long] {
-    override val clName = "long"
-    override val zeroName = "0L"
-    override val sizeOf = Sizeof.cl_long
-    override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
-      rawBuffer.order(ByteOrder.nativeOrder).getLong(idx * sizeOf)
-    }
-    override def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: Long) = {
-      rawBuffer.order(ByteOrder.nativeOrder).putLong(idx * sizeOf, v)
-    }
-  }
-  implicit object CLLong extends CLLong with Numeric.LongIsIntegral with Ordering.LongOrdering
-  trait CLInt extends CLType[Int] {
-    override val clName = "int"
-    override val zeroName = "0"
-    override val sizeOf = Sizeof.cl_int
-    override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
-      rawBuffer.order(ByteOrder.nativeOrder).getInt(idx * sizeOf)
-    }
-    override def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: Int) = {
-      rawBuffer.order(ByteOrder.nativeOrder).putInt(idx * sizeOf, v)
-    }
-  }
-  implicit object CLInt extends CLInt with Numeric.IntIsIntegral with Ordering.IntOrdering
-}
-
-trait CLType[T] extends Numeric[T] {
-  val clName: String
-  val sizeOf: Int
-  val header: String = ""
-  val zeroName: String
-  def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer): T
-  def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: T): Unit
-}
 
 class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val device: cl_device_id)
 {
   import OpenCL.{Program, Chunk, KernelArg, Dimensions, safeReleaseEvent}
   val log = LoggerFactory.getLogger(getClass)
+  val executionTime = new AtomicLong
   log.info("created OpenCLSession")
 
   case class ChunkIterator[T](chunk: Chunk[T])(implicit clT: CLType[T])
@@ -200,25 +32,44 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   {
     private val Chunk(elems, _, handle, inputReady) = chunk
     clRetainMemObject(handle)
-    var outputReady = new cl_event
-    private var rawBuffer: Option[ByteBuffer] = Some(clEnqueueMapBuffer(queue, handle, false, CL_MAP_READ, 0, clT.sizeOf * elems, 1, Array(inputReady), outputReady, null))
+    var outputReady : cl_event = null
+    private var rawBuffer: Option[ByteBuffer] = None
+    private var mappedOffset = 0L
+    private var idx = 0L
+    private def ensureMapped(idx: Long)(implicit clT: CLType[T]) = {
+      val maxMapSize = 1024L*1024*1024
+      if(rawBuffer.isEmpty || idx < mappedOffset || mappedOffset + maxMapSize <= idx) {
+        unmap()
+        mappedOffset = idx / maxMapSize * maxMapSize
+        val mapSize = Math.min(maxMapSize, clT.sizeOf * elems)
+        outputReady = new cl_event
+        rawBuffer = Some(clEnqueueMapBuffer(queue, handle, false, CL_MAP_READ, mappedOffset, clT.sizeOf * elems, 1, Array(inputReady), outputReady, null))
+      }
+    }
     override def hasNext = {
       val res = (idx != elems)
       if(!res)
         close
       res
     }
-    override def next = {
+    override def next() = {
+      ensureMapped(idx)
       if(outputReady != new cl_event) {
         clWaitForEvents(1, Array(outputReady))
         safeReleaseEvent(outputReady)
         outputReady = new cl_event
       }
       idx += 1
-      clT.fromByteBuffer(idx-1, rawBuffer.get)
+      clT.fromByteBuffer((idx-1-mappedOffset).toInt, rawBuffer.get)
     }
-    private var idx = 0
-    override def close : Unit = {
+    private def unmap() : Unit = {
+      rawBuffer.foreach(b => {
+        clEnqueueUnmapMemObject(queue, handle, b, 0, null, null)
+        safeReleaseEvent(outputReady)
+      })
+      rawBuffer = None
+    }
+    override def close() : Unit = {
       rawBuffer.foreach(b => {
         clEnqueueUnmapMemObject(queue, handle, b, 0, null, null)
         clReleaseMemObject(handle)
@@ -226,7 +77,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       })
       rawBuffer = None
     }
-    override def finalize: Unit = close
+    override def finalize(): Unit = close
   }
 
   private val programCache = Cache2kBuilder.of(classOf[Seq[String]], classOf[Program])
@@ -246,33 +97,12 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     programCache.get(source)
   }
 
-  var executionTime = new AtomicLong
-  var queueTime = new AtomicLong
-
-  class ProfilingCallback(ready: cl_event) extends EventCallbackFunction {
-    clRetainEvent(ready)
-    override def function(ready: cl_event, command_exec_callback_type: Int, user_data: AnyRef) = {
-      try {
-        val profiling = new Array[Long](1)
-        clGetEventProfilingInfo(ready, CL_PROFILING_COMMAND_QUEUED, Sizeof.cl_ulong, Pointer.to(profiling), null)
-        val queued = profiling(0)
-        clGetEventProfilingInfo(ready, CL_PROFILING_COMMAND_START, Sizeof.cl_ulong, Pointer.to(profiling), null)
-        val started = profiling(0)
-        clGetEventProfilingInfo(ready, CL_PROFILING_COMMAND_END, Sizeof.cl_ulong, Pointer.to(profiling), null)
-        val ended = profiling(0)
-        log.trace("kernel {} took {}ms", ready, (ended-started)/1e6)
-        queueTime.addAndGet(ended - queued)
-        executionTime.addAndGet(ended - started)
-      } finally safeReleaseEvent(ready)
-    }
-  }
-
   def callKernel(program: Program, kernelName: String, args: Seq[KernelArg], dependencies: Array[cl_event], dimensions: Dimensions, ready: cl_event) : Unit = {
     val startTime = System.nanoTime
     var kernel : Option[cl_kernel] = None
     try {
       kernel = Some(clCreateKernel(program.program, kernelName, null))
-      log.trace("createKernel took {}ms", (System.nanoTime - startTime)/1e6)
+      log.info("createKernel took {}ms", (System.nanoTime - startTime)/1e6)
 
       var index = 0
       val argTime = System.nanoTime
@@ -293,7 +123,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       )
       log.trace("clEnqueueNDRangeKernel {} took {}ms", ready, (System.nanoTime - enTime)/1e6)
 
-      clSetEventCallback(ready, CL_COMPLETE, new ProfilingCallback(ready), null)
+      clSetEventCallback(ready, CL_COMPLETE, new ProfilingCallback(ready, Some(executionTime)), null)
 
       val endTime = System.nanoTime
       log.trace("callKernel took {}ms", (endTime - startTime)/1e6)
@@ -305,8 +135,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   /*
    * parallelization happens outside Chunks for CPU
    */
-  var ngroups = if(OpenCL.CPU) 1 else 8*1024
-  var nlocal = if(OpenCL.CPU) 1 else 128
+  var ngroups : Long = if(OpenCL.CPU) 1 else 8*1024
+  var nlocal : Long = if(OpenCL.CPU) 1 else 128
  
   def reduceChunk[T](input: Chunk[T], header: String, identityElement: String, reduceBody: String)(implicit clT: CLType[T]): Future[T] = {
     val elemType = clT.clName
@@ -321,11 +151,11 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       __kernel
       __attribute__((vec_type_hint(""", elemType, """)))
       __attribute__((reqd_work_group_size(1, 1, 1)))
-      void reduce(__global """, elemType, """ *input, __global """, elemType, """ *output, __local """, elemType, """ *scratch, int size) {
+      void reduce(__global """, elemType, """ *input, __global """, elemType, """ *output, __local """, elemType, """ *scratch, long size) {
         """, elemType, """ cur = """, identityElement, """;
         output[get_group_id(0)] = cur;
         if(get_group_id(0) != 0) return;
-        for(int i=0; i<size; i++) {
+        for(long i=0; i<size; i++) {
           cur  = f(cur, input[i]);
         }
         output[get_group_id(0)] = cur;
@@ -340,10 +170,10 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       """}
       __kernel
       __attribute__((vec_type_hint(""", elemType, """)))
-      void reduce(__global """, elemType, """ *input, __global """, elemType, """ *output, __local """, elemType, """ *scratch, int size) {
+      void reduce(__global """, elemType, """ *input, __global """, elemType, """ *output, __local """, elemType, """ *scratch, long size) {
         int tid = get_local_id(0);
-        int i = get_group_id(0) * get_local_size(0) + get_local_id(0);
-        int gridSize = get_local_size(0) * get_num_groups(0);
+        long i = get_group_id(0) * get_local_size(0) + get_local_id(0);
+        long gridSize = get_local_size(0) * get_num_groups(0);
         """, elemType, """ cur = """, identityElement, """;
         for (; i<size; i = i + gridSize){
           cur = f(cur, input[i]);
@@ -416,7 +246,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * @param destructive if true, mapping is done in place if possible
    */
   def mapChunk[A,B](input: Chunk[A], functionBody: String, destructive: Boolean = false)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
-    //could be done in place even if sizes dont line up, but with a lot more complex code
+    //could be done in place even if sizes dont line up, but with more complex code
     val inplace = destructive && (clA.sizeOf == clB.sizeOf)
     val dimensions = Dimensions(1, Array(0), Array(input.size), null)
     val ready = new cl_event
@@ -429,7 +259,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         """}
         __kernel __attribute__((vec_type_hint(""", clA.clName, """)))
         void map(__global """, clB.clName, """ *input) {
-          int i = get_global_id(0);
+          long i = get_global_id(0);
           input[i] = f(as_""", clA.clName,"""(input[i]));
         }"""))
         callKernel(
@@ -448,7 +278,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         """}
         __kernel __attribute__((vec_type_hint(""", clA.clName, """)))
         void map(__global """, clA.clName, " *input, __global ", clB.clName, """ *output) {
-          int i = get_global_id(0);
+          long i = get_global_id(0);
           output[i] = f(input[i]);
         }"""))
         val handle: cl_mem = clCreateBuffer(context, 0, input.size*clB.sizeOf, null, null)

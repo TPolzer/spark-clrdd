@@ -1,3 +1,5 @@
+package de.qaware.chronix
+
 import org.apache.spark.rdd._
 import org.apache.spark._
 import org.slf4j.LoggerFactory
@@ -7,7 +9,7 @@ import scala.reflect.ClassTag
 
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
-import ExecutionContext.Implicits.global
+import scala.concurrent.ExecutionContext.Implicits.global
 
 object CLRDD
 {
@@ -45,6 +47,10 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
   def map[B : CLType : ClassTag](functionBody: String) : CLRDD[B] = {
     new CLRDD(wrapped.map(_.map[B](functionBody)), parentRDD)
   }
+
+  override def count : Long = {
+    wrapped.map(_.count).fold(0L)(_+_)
+  }
   
   def sum(implicit num: Numeric[T]) : T = {
     wrapped.map(_.sum).reduce(num.plus(_, _))
@@ -77,7 +83,7 @@ trait CLPartition[T] { self =>
   @transient private lazy val log = LoggerFactory.getLogger(getClass)
   @transient protected var session : OpenCLSession = null
   @transient protected var storage : Array[OpenCL.Chunk[T]] = null
-  protected var doCache = false
+  @transient protected var doCache = false
   protected def src : (OpenCLSession, Iterator[OpenCL.Chunk[T]])
   def get : (OpenCLSession, Iterator[OpenCL.Chunk[T]]) = {
     if(doCache) {
@@ -104,13 +110,17 @@ trait CLPartition[T] { self =>
   }
   def sum(implicit clT: CLType[T]) : T = {
     val (session, chunks) = get
-    Await.result(Future.fold(chunks.map(chunk => {
+    val future = chunks.map(chunk => {
       try {
-        session.reduceChunk[T](chunk.asInstanceOf[OpenCL.Chunk[T]], "", clT.zeroName, "return x+y;")
+        session.reduceChunk[T](chunk, "", clT.zeroName, "return x+y;")
       } finally {
         if(!doCache) chunk.close
       }
-    }))(clT.zero)(clT.plus(_, _)), Duration.Inf)
+    }).foldLeft(Future.successful(clT.zero))({ (l: Future[T], r: Future[T]) =>
+      val lval = Await.result(l, Duration.Inf)
+      r.map(clT.plus(lval,_))
+    })
+    Await.result(future, Duration.Inf)
   }
   def map[B](functionBody: String)(implicit clT: CLType[T], clB: CLType[B]) : CLPartition[B] = {
     new CLPartition[B](){
@@ -126,6 +136,14 @@ trait CLPartition[T] { self =>
         (session, mappedChunks)
       }
     }
+  }
+  def count : Long = {
+    val (session, chunks) = get
+    chunks.map(chunk => {
+      val res = chunk.size
+      if(!doCache) chunk.close
+      res
+    }).sum
   }
   def iterator (ctx: TaskContext)(implicit clT: CLType[T]) : Iterator[T] = {
     val (session, chunks) = get
