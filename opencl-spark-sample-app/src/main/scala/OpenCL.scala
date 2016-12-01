@@ -286,7 +286,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       } else {
         val program = getProgram(commonText ++ Array(
         "__kernel __attribute__((vec_type_hint(", clA.clName, """)))
-        void map(__global char *input, __global cha *output) {
+        void map(__global char *input, __global char *output) {
           long i = get_global_id(0);
           setA(f(getB(input, i)), output, i);
         }"""))
