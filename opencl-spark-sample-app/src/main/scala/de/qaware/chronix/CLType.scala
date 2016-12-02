@@ -67,4 +67,19 @@ object CLType {
     }
   }
   implicit object CLInt extends CLInt with Numeric.IntIsIntegral with Ordering.IntOrdering
+  class CLVector2[T](implicit clT: CLType[T]) extends CLType[(T,T)] with Serializable {
+    override val clName = clT.clName + "2"
+    override val sizeOf = clT.sizeOf * 2
+    override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
+      (clT.fromByteBuffer(idx * 2, rawBuffer), clT.fromByteBuffer(idx * 2 + 1, rawBuffer))
+    }
+    override def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: (T,T)) = {
+      clT.toByteBuffer(idx * 2, rawBuffer, v._1)
+      clT.toByteBuffer(idx * 2, rawBuffer, v._2)
+    }
+  }
+  implicit val CLFloat2 = new CLVector2[Float]
+  implicit val CLDouble2 = new CLVector2[Double]
+  implicit val CLInt2 = new CLVector2[Int]
+  implicit val CLLong2  = new CLVector2[Long]
 }
