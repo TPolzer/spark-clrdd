@@ -83,7 +83,8 @@ trait CLPartition[T] { self =>
   @transient private lazy val log = LoggerFactory.getLogger(getClass)
   @transient protected var session : OpenCLSession = null
   @transient protected var storage : Array[OpenCL.Chunk[T]] = null
-  @transient protected var doCache = false
+  private var _doCache = false
+  def doCache = _doCache
   protected def src : (OpenCLSession, Iterator[OpenCL.Chunk[T]])
   def get : (OpenCLSession, Iterator[OpenCL.Chunk[T]]) = {
     if(doCache) {
@@ -98,11 +99,11 @@ trait CLPartition[T] { self =>
     }
   }
   def cache = {
-    doCache = true
+    _doCache = true
   }
   def uncache = {
     if(storage != null) {
-      doCache = false
+      _doCache = false
       storage.foreach(_.close)
       storage = null
       session = null
@@ -123,19 +124,7 @@ trait CLPartition[T] { self =>
     Await.result(future, Duration.Inf)
   }
   def map[B](functionBody: String)(implicit clT: CLType[T], clB: CLType[B]) : CLPartition[B] = {
-    new CLPartition[B](){
-      override def src = {
-        val (session, parentChunks) = self.get
-        val mappedChunks = parentChunks.map(c => {
-            if(self.doCache) {
-              session.mapChunk[T,B](c, functionBody, false)
-            } else {
-              session.mapChunk[T,B](c, functionBody, true)
-            }
-        })
-        (session, mappedChunks)
-      }
-    }
+    new CLMapPartition[T, B](functionBody, this)
   }
   def count : Long = {
     val (session, chunks) = get
@@ -153,5 +142,31 @@ trait CLPartition[T] { self =>
         chunk.close
       res
     })
+  }
+}
+
+class CLMapPartition[A, B](val functionBody: String, val parent: CLPartition[A])(implicit clA: CLType[A], clB: CLType[B]) 
+  extends CLPartition[B]
+{
+  val f = MapFunction[A,B](functionBody, clA, clB)
+  def composed[C: CLType](g: MapKernel[B,C]) : (OpenCLSession, Iterator[OpenCL.Chunk[C]]) = {
+    val fg = MapComposition(f, g, clA, clB, implicitly[CLType[C]])
+    (doCache, parent) match {
+      case (false, p : CLMapPartition[_, A]) => p.composed(fg)
+      case _ =>  {
+        val (session, parentChunks) = parent.get
+        val mappedChunks = parentChunks.map(c => {
+          if(parent.doCache) {
+            session.mapChunk[A,C](c, fg, false)
+          } else {
+            session.mapChunk[A,C](c, fg, true)
+          }
+        })
+        (session, mappedChunks)
+      }
+    }
+  }
+  override def src = {
+    composed(MapFunction[B,B]("return x;", clB, clB))
   }
 }

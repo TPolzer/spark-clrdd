@@ -95,8 +95,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         val program = clCreateProgramWithSource(context, source.size, source.toArray, null, null)
         val res = Program(program) // finalize if buildProgram throws
         import org.apache.commons.lang.builder.ReflectionToStringBuilder
-        if(log.isInfoEnabled)
-          log.info("building program: {}", source.flatten)
+//        if(log.isInfoEnabled)
+//          log.info("building program: {}", source.flatten)
+        log.warn("building program: {}", source.fold("")(_+_))
         clBuildProgram(res.program, 0, null, "-cl-unsafe-math-optimizations", null, null)
       res
       }
@@ -140,6 +141,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
 
   /*
    * parallelization happens outside Chunks for CPU
+   * for GPU this could be tuned (possibly depending on operation types)
+   * values other than 1 will lead to wrong results on CPU (and wasted time)
    */
   var ngroups : Long = if(OpenCL.CPU) 1 else 8*1024
   var nlocal : Long = if(OpenCL.CPU) 1 else 128
@@ -148,57 +151,12 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   def reduceChunk[T](input: Chunk[T], header: String, identityElement: String, reduceBody: String)(implicit clT: CLType[T]): Future[T] = {
     val elemType = clT.clName
     val startTime = System.nanoTime
-/*    val program = if (OpenCL.CPU)
-      getProgram(("reduce", header, identityElement, reduceBody, clT), () => Array(
-      "#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n",
-      header,
-      "inline ", elemType, " f(", elemType," x, ", elemType, " y) {\n",
+    val kernel = MapReduceKernel(
+      MapFunction("return x;", clT, clT),
       reduceBody,
-      """}
-      __kernel
-      __attribute__((vec_type_hint(""", elemType, """)))
-      __attribute__((reqd_work_group_size(1, 1, 1)))
-      void reduce(__global """, elemType, """ *input, __global """, elemType, """ *output, __local """, elemType, """ *scratch, long size) {
-        """, elemType, """ cur = """, identityElement, """;
-        output[get_group_id(0)] = cur;
-        if(get_group_id(0) != 0) return;
-        for(long i=0; i<size; i++) {
-          cur  = f(cur, input[i]);
-        }
-        output[get_group_id(0)] = cur;
-        return;
-      }"""))
-    else
-      getProgram(Array(
-      "#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n",
-      header,
-      "inline ", elemType, " f(", elemType," x, ", elemType, " y) {\n",
-      reduceBody,
-      """}
-      __kernel
-      __attribute__((vec_type_hint(""", elemType, """)))
-      void reduce(__global """, elemType, """ *input, __global """, elemType, """ *output, __local """, elemType, """ *scratch, long size) {
-        int tid = get_local_id(0);
-        long i = get_group_id(0) * get_local_size(0) + get_local_id(0);
-        long gridSize = get_local_size(0) * get_num_groups(0);
-        """, elemType, """ cur = """, identityElement, """;
-        for (; i<size; i = i + gridSize){
-          cur = f(cur, input[i]);
-        }
-        scratch[tid]  = cur;
-        barrier(CLK_LOCAL_MEM_FENCE);
-        for (int s = get_local_size(0) / 2; s>0; s = s >> 1){
-          if (tid<s){
-            scratch[tid]  = f(scratch[tid], scratch[(tid + s)]);
-          }
-          barrier(CLK_LOCAL_MEM_FENCE);
-        }
-        if (tid==0){
-          output[get_group_id(0)]  = scratch[0];
-        }
-        return;
-      }"""))
-    log.trace("getProgram took {}ms", (System.nanoTime - startTime)/1e6)*/
+      identityElement,
+      OpenCL.CPU,
+      clT, clT)
     val numWorkGroups = ngroups
     val localSize = nlocal // TODO make this tunable / evaluate...?
     val globalSize = localSize * numWorkGroups
@@ -211,14 +169,14 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       reduceBuffer = Some(clCreateBuffer(context, 0, numWorkGroups * clT.sizeOf, null, null))
       resBuffer = Some(clCreateBuffer(context, 0, clT.sizeOf, null, null))
       callKernel(
-        null, "reduce",
+        kernel, "reduce",
         KernelArg(input.handle) :: KernelArg(reduceBuffer.get) :: KernelArg(null, clT.sizeOf * localSize) :: KernelArg(input.size) :: Nil,
         Array(input.ready),
         Dimensions(1, Array(0), Array(globalSize), Array(localSize)),
         ready1
       )
       callKernel(
-        null, "reduce",
+        kernel, "reduce",
         KernelArg(reduceBuffer.get) :: KernelArg(resBuffer.get) :: KernelArg(null, clT.sizeOf * localSize) :: KernelArg(numWorkGroups) :: Nil,
         Array(ready1),
         Dimensions(1, Array(0), Array(localSize), Array(localSize)),
@@ -252,64 +210,39 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * @param functionBody the body of the map function 'inline B f(A x) {#functionBody}'.
    * @param destructive if true, mapping is done in place if possible
    */
-  def mapChunk[A,B](input: Chunk[A], functionBody: String, destructive: Boolean = false)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
+  def mapChunk[A,B](input: Chunk[A], kernel: MapKernel[A,B], destructive: Boolean = false)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
     //could be done in place even if sizes dont line up, but with more complex code
     val inplace = destructive && (clA.sizeOf == clB.sizeOf)
     val dimensions = Dimensions(1, Array(0), Array(input.size), null)
     val ready = new cl_event
+    var handle: Option[cl_mem] = None
     try {
-      val commonText = Array(
-          """#pragma OPENCL EXTENSION cl_khr_fp64 : enable
-        inline """, clB.clName, " f(", clA.clName, " x) {\n",
-          functionBody,
-        """}
-        inline """, clA.clName, " getB(__global char *buffer, long i) {\n",
-          clA.getter,
-        """}
-        inline void setA(""", clB.clName, " v, __global char *buffer, long i) {\n",
-          clB.setter,
-        "}"
+      var realKernel = if(inplace) {
+        InplaceMap(kernel)
+      } else {
+        kernel
+      }
+      val kernelArgs = new ArrayBuffer[KernelArg]
+      kernelArgs += KernelArg(input.handle)
+      if(!inplace) {
+        handle = Some(clCreateBuffer(context, 0, input.size*clB.sizeOf, null, null))
+        kernelArgs += KernelArg(handle.get)
+      }
+      callKernel(
+        realKernel, "map",
+        kernelArgs,
+        Array(input.ready),
+        dimensions,
+        ready
       )
       if(inplace) {
-        val kernel = InplaceMap(MapFunction(functionBody, clA, clB)) 
-/*        val program = getProgram(commonText ++ Array(
-        "__kernel __attribute__((vec_type_hint(", clA.clName, """)))
-        void map(__global char *input) {
-          long i = get_global_id(0);
-          setA(f(getB(input, i)), input, i);
-        }"""))*/
-        callKernel(
-          kernel, "map",
-          KernelArg(input.handle) :: Nil,
-          Array(input.ready),
-          dimensions,
-          ready
-        )
         new Chunk[B](input.size, input.space, input.handle, ready)
       } else {
-        val kernel = MapFunction(functionBody, clA, clB)
-/*        val program = getProgram(commonText ++ Array(
-        "__kernel __attribute__((vec_type_hint(", clA.clName, """)))
-        void map(__global char *input, __global char *output) {
-          long i = get_global_id(0);
-          setA(f(getB(input, i)), output, i);
-        }"""))*/
-        val handle: cl_mem = clCreateBuffer(context, 0, input.size*clB.sizeOf, null, null)
-        try {
-          callKernel(
-            kernel, "map",
-            KernelArg(input.handle) :: KernelArg(handle) :: Nil,
-            Array(input.ready),
-            dimensions,
-            ready
-          )
-          new Chunk[B](input.size, input.size*clB.sizeOf, handle, ready)
-        } finally {
-          clReleaseMemObject(handle)
-        }
+        new Chunk[B](input.size, input.size*clB.sizeOf, handle.get, ready)
       }
     } finally {
       safeReleaseEvent(ready)
+      handle.foreach(clReleaseMemObject)
       if(destructive)
         input.close
     }
