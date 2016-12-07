@@ -87,27 +87,23 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     override def finalize(): Unit = close
   }
 
-  private val programCache = Cache2kBuilder.of(classOf[Seq[String]], classOf[Program])
+  private val programCache : Cache[CLProgramSource, Program] = Cache2kBuilder.of(classOf[CLProgramSource], classOf[Program])
     .entryCapacity(100)
-    .loader(new CacheLoader[Seq[String],Program](){
-      override def load(source: Seq[String]) : Program = {
+    .loader(new CacheLoader[CLProgramSource,Program](){
+      override def load(key: CLProgramSource) : Program = {
+        val source = key.generateSource
         val program = clCreateProgramWithSource(context, source.size, source.toArray, null, null)
         val res = Program(program) // finalize if buildProgram throws
         import org.apache.commons.lang.builder.ReflectionToStringBuilder
         if(log.isInfoEnabled)
           log.info("building program: {}", source.flatten)
         clBuildProgram(res.program, 0, null, "-cl-unsafe-math-optimizations", null, null)
-        res
+      res
       }
     }).build
-  /**
-   * Build (or get from cache) an OpenCL program.
-   */
-  def getProgram(source: Seq[String]) : Program = {
-    programCache.get(source)
-  }
 
-  def callKernel(program: Program, kernelName: String, args: Seq[KernelArg], dependencies: Array[cl_event], dimensions: Dimensions, ready: cl_event) : Unit = {
+  def callKernel(programSource: CLProgramSource, kernelName: String, args: Seq[KernelArg], dependencies: Array[cl_event], dimensions: Dimensions, ready: cl_event) : Unit = {
+    val program = programCache.get(programSource)
     val startTime = System.nanoTime
     var kernel : Option[cl_kernel] = None
     try {
@@ -147,12 +143,13 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    */
   var ngroups : Long = if(OpenCL.CPU) 1 else 8*1024
   var nlocal : Long = if(OpenCL.CPU) 1 else 128
+
  
   def reduceChunk[T](input: Chunk[T], header: String, identityElement: String, reduceBody: String)(implicit clT: CLType[T]): Future[T] = {
     val elemType = clT.clName
     val startTime = System.nanoTime
-    val program = if (OpenCL.CPU)
-      getProgram(Array(
+/*    val program = if (OpenCL.CPU)
+      getProgram(("reduce", header, identityElement, reduceBody, clT), () => Array(
       "#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n",
       header,
       "inline ", elemType, " f(", elemType," x, ", elemType, " y) {\n",
@@ -201,7 +198,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         }
         return;
       }"""))
-    log.trace("getProgram took {}ms", (System.nanoTime - startTime)/1e6)
+    log.trace("getProgram took {}ms", (System.nanoTime - startTime)/1e6)*/
     val numWorkGroups = ngroups
     val localSize = nlocal // TODO make this tunable / evaluate...?
     val globalSize = localSize * numWorkGroups
@@ -214,14 +211,14 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       reduceBuffer = Some(clCreateBuffer(context, 0, numWorkGroups * clT.sizeOf, null, null))
       resBuffer = Some(clCreateBuffer(context, 0, clT.sizeOf, null, null))
       callKernel(
-        program, "reduce",
+        null, "reduce",
         KernelArg(input.handle) :: KernelArg(reduceBuffer.get) :: KernelArg(null, clT.sizeOf * localSize) :: KernelArg(input.size) :: Nil,
         Array(input.ready),
         Dimensions(1, Array(0), Array(globalSize), Array(localSize)),
         ready1
       )
       callKernel(
-        program, "reduce",
+        null, "reduce",
         KernelArg(reduceBuffer.get) :: KernelArg(resBuffer.get) :: KernelArg(null, clT.sizeOf * localSize) :: KernelArg(numWorkGroups) :: Nil,
         Array(ready1),
         Dimensions(1, Array(0), Array(localSize), Array(localSize)),
@@ -274,14 +271,15 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         "}"
       )
       if(inplace) {
-        val program = getProgram(commonText ++ Array(
+        val kernel = InplaceMap(MapFunction(functionBody, clA, clB)) 
+/*        val program = getProgram(commonText ++ Array(
         "__kernel __attribute__((vec_type_hint(", clA.clName, """)))
         void map(__global char *input) {
           long i = get_global_id(0);
           setA(f(getB(input, i)), input, i);
-        }"""))
+        }"""))*/
         callKernel(
-          program, "map",
+          kernel, "map",
           KernelArg(input.handle) :: Nil,
           Array(input.ready),
           dimensions,
@@ -289,16 +287,17 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         )
         new Chunk[B](input.size, input.space, input.handle, ready)
       } else {
-        val program = getProgram(commonText ++ Array(
+        val kernel = MapFunction(functionBody, clA, clB)
+/*        val program = getProgram(commonText ++ Array(
         "__kernel __attribute__((vec_type_hint(", clA.clName, """)))
         void map(__global char *input, __global char *output) {
           long i = get_global_id(0);
           setA(f(getB(input, i)), output, i);
-        }"""))
+        }"""))*/
         val handle: cl_mem = clCreateBuffer(context, 0, input.size*clB.sizeOf, null, null)
         try {
           callKernel(
-            program, "map",
+            kernel, "map",
             KernelArg(input.handle) :: KernelArg(handle) :: Nil,
             Array(input.ready),
             dimensions,
