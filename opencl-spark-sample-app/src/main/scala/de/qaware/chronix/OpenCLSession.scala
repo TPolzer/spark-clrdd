@@ -32,7 +32,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   {
     private val Chunk(elems, _, handle, inputReady) = chunk
     clRetainMemObject(handle)
+    clRetainEvent(inputReady)
     var outputReady : cl_event = null
+    var closed = false
     private var rawBuffer: Option[ByteBuffer] = None
     private var mappedOffset = 0L
     private var idx = 0L
@@ -42,7 +44,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       if(rawBuffer.isEmpty || address < mappedOffset || mappedOffset + maxMapSize <= address) {
         unmap()
         mappedOffset = address / maxMapSize * maxMapSize
-        val mapSize = Math.min(maxMapSize, clT.sizeOf * elems)
+        val mapSize = Math.min(maxMapSize, clT.sizeOf * elems - mappedOffset)
         outputReady = new cl_event
         log.trace("mapping {} for iteration at offset {}, size {}", handle, mappedOffset.asInstanceOf[AnyRef], mapSize.asInstanceOf[AnyRef])
         rawBuffer = Some(clEnqueueMapBuffer(queue, handle, false, CL_MAP_READ, mappedOffset, mapSize, 1, Array(inputReady), outputReady, null))
@@ -72,11 +74,14 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       rawBuffer = None
     }
     override def close() : Unit = {
+      if(closed) return
+      closed = true
       rawBuffer.foreach(b => {
         clEnqueueUnmapMemObject(queue, handle, b, 0, null, null)
-        clReleaseMemObject(handle)
         safeReleaseEvent(outputReady)
       })
+      clReleaseMemObject(handle)
+      safeReleaseEvent(inputReady)
       rawBuffer = None
     }
     override def finalize(): Unit = close
