@@ -95,9 +95,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         val program = clCreateProgramWithSource(context, source.size, source.toArray, null, null)
         val res = Program(program) // finalize if buildProgram throws
         import org.apache.commons.lang.builder.ReflectionToStringBuilder
-//        if(log.isInfoEnabled)
-//          log.info("building program: {}", source.flatten)
-        log.warn("building program: {}", source.fold("")(_+_))
+        if(log.isInfoEnabled)
+          log.info("building program: {}", source.flatten)
         clBuildProgram(res.program, 0, null, "-cl-unsafe-math-optimizations", null, null)
       res
       }
