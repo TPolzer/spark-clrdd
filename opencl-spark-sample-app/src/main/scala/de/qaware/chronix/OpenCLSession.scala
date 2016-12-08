@@ -130,7 +130,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         dependencies,
         ready
       )
-      log.info("clEnqueueNDRangeKernel {} took {}ms", ready, (System.nanoTime - enTime)/1e6)
+      log.trace("clEnqueueNDRangeKernel {} took {}ms", ready, (System.nanoTime - enTime)/1e6)
 
       clSetEventCallback(ready, CL_COMPLETE, new ProfilingCallback(ready, Some(executionTime)), null)
     } finally {
@@ -144,54 +144,86 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * values other than 1 will lead to wrong results on CPU (and wasted time)
    */
   var ngroups : Long = if(OpenCL.CPU) 1 else 8*1024
-  var nlocal : Long = if(OpenCL.CPU) 1 else 64
+  var nlocal : Long = if(OpenCL.CPU) 1 else 128
 
- 
+  /*
+   * For some OpenCL implementations, allocating small buffers is quite
+   * expensive (NVIDIA, I'm looking at you), even if they are freed again
+   * rapidly. This is a free-list of 32*64KB = 2MB. Each reduce needs two of
+   * them, one for the result and one for intermediate storage.
+   */
+  val dustSize = 8*8*1024
+  val dustQueue = new java.util.concurrent.ConcurrentLinkedQueue[cl_mem]
+  (1 to 32).foreach(_ => {
+    val mem = clCreateBuffer(context, 0, dustSize, null, null)
+    dustQueue.add(mem)
+  })
+  def retDust = dustQueue.add(_)
+  def getDust = { var tmp : cl_mem = null
+    tmp = dustQueue.poll()
+    while(tmp == null) {
+      Thread.sleep(10)
+      tmp = dustQueue.poll()
+    }
+    tmp
+  }
+
   def reduceChunk[A, B](input: Chunk[A], kernel: MapReduceKernel[A,B])(implicit clA: CLType[A], clB: CLType[B]): Future[B] = {
     val startTime = System.nanoTime
-    val numWorkGroups = ngroups
+    assert(clB.sizeOf <= dustSize)
+    val numWorkGroups = {
+      var tmp = ngroups
+      while(tmp * clB.sizeOf > dustSize) {
+        tmp = tmp/2
+      }
+      tmp
+    }
     val localSize = nlocal // TODO make this tunable / evaluate...?
     val globalSize = localSize * numWorkGroups
     val finished = new cl_event
     val ready1 = new cl_event
     val ready2 = new cl_event
-    var reduceBuffer : Option[cl_mem] = None
-    var resBuffer : Option[cl_mem] = None
+    var reduceBuffer : cl_mem = null
+    var resBuffer : cl_mem = null
+    var callbackSet = false
     try {
-      reduceBuffer = Some(clCreateBuffer(context, 0, numWorkGroups * clB.sizeOf, null, null))
-      resBuffer = Some(clCreateBuffer(context, 0, clB.sizeOf, null, null))
+      reduceBuffer = getDust
+      resBuffer = getDust
       callKernel(
         kernel, "reduce",
-        KernelArg(input.handle) :: KernelArg(reduceBuffer.get) :: KernelArg(null, clB.sizeOf * localSize) :: KernelArg(input.size) :: Nil,
+        KernelArg(input.handle) :: KernelArg(reduceBuffer) :: KernelArg(null, clB.sizeOf * localSize) :: KernelArg(input.size) :: Nil,
         Array(input.ready),
         Dimensions(1, Array(0), Array(globalSize), Array(localSize)),
         ready1
       )
       callKernel(
         kernel.stage2, "reduce",
-        KernelArg(reduceBuffer.get) :: KernelArg(resBuffer.get) :: KernelArg(null, clB.sizeOf * localSize) :: KernelArg(numWorkGroups) :: Nil,
+        KernelArg(reduceBuffer) :: KernelArg(resBuffer) :: KernelArg(null, clB.sizeOf * localSize) :: KernelArg(numWorkGroups) :: Nil,
         Array(ready1),
         Dimensions(1, Array(0), Array(localSize), Array(localSize)),
         ready2
       )
       val promise = Promise[B]
       val future = promise.future
-      val result = clEnqueueMapBuffer(queue, resBuffer.get, false, CL_MAP_READ, 0, clB.sizeOf, 1, Array(ready2), finished, null)
+      val result = ByteBuffer.allocateDirect(clB.sizeOf)
+      clEnqueueReadBuffer(queue, resBuffer, false, 0, clB.sizeOf, Pointer.to(result), 1, Array(ready2), finished)
       clSetEventCallback(finished, CL_COMPLETE, new EventCallbackFunction(){
-        clRetainMemObject(resBuffer.get)
         override def function(event: cl_event, command_exec_callback_type: Int, user_data: AnyRef): Unit = {
           promise.success(clB.fromByteBuffer(0, result))
-          clEnqueueUnmapMemObject(queue, resBuffer.get, result, 0, null, null)
-          clReleaseMemObject(resBuffer.get)
+          retDust(reduceBuffer)
+          retDust(resBuffer)
         }
       }, null)
+      callbackSet = true
       future
     } finally {
       safeReleaseEvent(finished)
       safeReleaseEvent(ready1)
       safeReleaseEvent(ready2)
-      resBuffer.foreach(clReleaseMemObject)
-      reduceBuffer.foreach(clReleaseMemObject)
+      if(!callbackSet) {
+          retDust(reduceBuffer)
+          retDust(resBuffer)
+      }
       val endTime = System.nanoTime
       log.trace("reduce overhead took {}ms", (endTime - startTime)/1e6)
     }
