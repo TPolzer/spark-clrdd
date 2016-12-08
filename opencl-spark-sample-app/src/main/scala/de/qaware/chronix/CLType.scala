@@ -7,11 +7,18 @@ import java.nio.ByteBuffer
 trait CLType[T] {
   val clName: String
   val sizeOf: Int
-  val header: String = ""
-  lazy val getter: String = s"return as_$clName(vload$sizeOf(i, buffer));"
-  lazy val setter: String = s"vstore$sizeOf(as_char$sizeOf(v), i, buffer);"
+  val header: String = "" // has to be idempotent, define struct here
   def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer): T
   def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: T): Unit
+ 
+
+  //CLTypes have to be singleton types, this is natural and makes caching kernels easier
+  override def equals(o: Any) = {
+    o.getClass.equals(this.getClass)
+  }
+  override def hashCode() = {
+    this.getClass.hashCode
+  }
 }
 
 trait CLNumeric[T] extends CLType[T] with Numeric[T] {

@@ -79,7 +79,7 @@ class CLWrapPartition[T : CLType] (val parentPartition: Partition, val parentRDD
   }
 }
 
-trait CLPartition[T] { self =>
+trait CLPartition[T] {
   @transient private lazy val log = LoggerFactory.getLogger(getClass)
   @transient protected var session : OpenCLSession = null
   @transient protected var storage : Array[OpenCL.Chunk[T]] = null
@@ -109,20 +109,29 @@ trait CLPartition[T] { self =>
       session = null
     }
   }
-  def sum(implicit clT: CLNumeric[T]) : T = {
+  def reduce[B](kernel: MapReduceKernel[T, B], e: B, combine: (B,B) => B)
+      (implicit clT: CLType[T], clB: CLType[B]) : B = {
     val (session, chunks) = get
     val future = chunks.map(chunk => {
       try {
-        session.reduceChunk[T](chunk, "", clT.zeroName, "return x+y;")
+        session.reduceChunk(chunk, kernel)
       } finally {
         if(!doCache) chunk.close
       }
-    }).foldLeft(Future.successful(clT.zero))({ (l: Future[T], r: Future[T]) =>
+    }).foldLeft(Future.successful(e))({ (l: Future[B], r: Future[B]) =>
       val lval = Await.result(l, Duration.Inf)
-      r.map(clT.plus(lval,_))
+      r.map(combine(lval,_))
     })
     Await.result(future, Duration.Inf)
   }
+  def sum(implicit clT: CLNumeric[T]) : T = reduce(MapReduceKernel(
+    MapKernel.identity[T],
+    "return x+y;",
+    clT.zeroName,
+    OpenCL.CPU,
+    clT, clT
+  ), clT.zero, ((x: T, y: T) => clT.plus(x,y)))
+
   def map[B](functionBody: String)(implicit clT: CLType[T], clB: CLType[B]) : CLPartition[B] = {
     new CLMapPartition[T, B](functionBody, this)
   }
@@ -150,7 +159,7 @@ class CLMapPartition[A, B](val functionBody: String, val parent: CLPartition[A])
 {
   val f = MapFunction[A,B](functionBody, clA, clB)
   def composed[C: CLType](g: MapKernel[B,C]) : (OpenCLSession, Iterator[OpenCL.Chunk[C]]) = {
-    val fg = MapComposition(f, g, clA, clB, implicitly[CLType[C]])
+    val fg = f.compose(g)
     (doCache, parent) match {
       case (false, p : CLMapPartition[_, A]) => p.composed(fg)
       case _ =>  {
@@ -168,5 +177,12 @@ class CLMapPartition[A, B](val functionBody: String, val parent: CLPartition[A])
   }
   override def src = {
     composed(MapFunction[B,B]("return x;", clB, clB))
+  }
+  override def reduce[C](kernel: MapReduceKernel[B, C], e: C, combine: (C,C) => C)
+      (implicit clB: CLType[B], clC: CLType[C]) : C = {
+    if(doCache)
+      super.reduce(kernel, e, combine)
+    else
+      parent.reduce(kernel.precomposeMap(f), e, combine)
   }
 }

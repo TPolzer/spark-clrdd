@@ -104,12 +104,14 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }).build
 
   def callKernel(programSource: CLProgramSource, kernelName: String, args: Seq[KernelArg], dependencies: Array[cl_event], dimensions: Dimensions, ready: cl_event) : Unit = {
-    val program = programCache.get(programSource)
     val startTime = System.nanoTime
+    val program = programCache.get(programSource)
+    val createTime = System.nanoTime
+    log.trace("get Kernel took {}ms", (createTime - startTime)/1e6)
     var kernel : Option[cl_kernel] = None
     try {
       kernel = Some(clCreateKernel(program.program, kernelName, null))
-      log.trace("createKernel took {}ms", (System.nanoTime - startTime)/1e6)
+      log.trace("createKernel took {}ms", (System.nanoTime - createTime)/1e6)
 
       var index = 0
       val argTime = System.nanoTime
@@ -128,12 +130,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         dependencies,
         ready
       )
-      log.trace("clEnqueueNDRangeKernel {} took {}ms", ready, (System.nanoTime - enTime)/1e6)
+      log.info("clEnqueueNDRangeKernel {} took {}ms", ready, (System.nanoTime - enTime)/1e6)
 
       clSetEventCallback(ready, CL_COMPLETE, new ProfilingCallback(ready, Some(executionTime)), null)
-
-      val endTime = System.nanoTime
-      log.trace("callKernel took {}ms", (endTime - startTime)/1e6)
     } finally {
       kernel.foreach(clReleaseKernel)
     }
@@ -148,15 +147,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   var nlocal : Long = if(OpenCL.CPU) 1 else 128
 
  
-  def reduceChunk[T](input: Chunk[T], header: String, identityElement: String, reduceBody: String)(implicit clT: CLType[T]): Future[T] = {
-    val elemType = clT.clName
+  def reduceChunk[A, B](input: Chunk[A], kernel: MapReduceKernel[A,B])(implicit clA: CLType[A], clB: CLType[B]): Future[B] = {
     val startTime = System.nanoTime
-    val kernel = MapReduceKernel(
-      MapFunction("return x;", clT, clT),
-      reduceBody,
-      identityElement,
-      OpenCL.CPU,
-      clT, clT)
     val numWorkGroups = ngroups
     val localSize = nlocal // TODO make this tunable / evaluate...?
     val globalSize = localSize * numWorkGroups
@@ -166,29 +158,29 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     var reduceBuffer : Option[cl_mem] = None
     var resBuffer : Option[cl_mem] = None
     try {
-      reduceBuffer = Some(clCreateBuffer(context, 0, numWorkGroups * clT.sizeOf, null, null))
-      resBuffer = Some(clCreateBuffer(context, 0, clT.sizeOf, null, null))
+      reduceBuffer = Some(clCreateBuffer(context, 0, numWorkGroups * clB.sizeOf, null, null))
+      resBuffer = Some(clCreateBuffer(context, 0, clB.sizeOf, null, null))
       callKernel(
         kernel, "reduce",
-        KernelArg(input.handle) :: KernelArg(reduceBuffer.get) :: KernelArg(null, clT.sizeOf * localSize) :: KernelArg(input.size) :: Nil,
+        KernelArg(input.handle) :: KernelArg(reduceBuffer.get) :: KernelArg(null, clB.sizeOf * localSize) :: KernelArg(input.size) :: Nil,
         Array(input.ready),
         Dimensions(1, Array(0), Array(globalSize), Array(localSize)),
         ready1
       )
       callKernel(
-        kernel, "reduce",
-        KernelArg(reduceBuffer.get) :: KernelArg(resBuffer.get) :: KernelArg(null, clT.sizeOf * localSize) :: KernelArg(numWorkGroups) :: Nil,
+        kernel.stage2, "reduce",
+        KernelArg(reduceBuffer.get) :: KernelArg(resBuffer.get) :: KernelArg(null, clB.sizeOf * localSize) :: KernelArg(numWorkGroups) :: Nil,
         Array(ready1),
         Dimensions(1, Array(0), Array(localSize), Array(localSize)),
         ready2
       )
-      val promise = Promise[T]
+      val promise = Promise[B]
       val future = promise.future
-      val result = clEnqueueMapBuffer(queue, resBuffer.get, false, CL_MAP_READ, 0, clT.sizeOf, 1, Array(ready2), finished, null)
+      val result = clEnqueueMapBuffer(queue, resBuffer.get, false, CL_MAP_READ, 0, clB.sizeOf, 1, Array(ready2), finished, null)
       clSetEventCallback(finished, CL_COMPLETE, new EventCallbackFunction(){
         clRetainMemObject(resBuffer.get)
         override def function(event: cl_event, command_exec_callback_type: Int, user_data: AnyRef): Unit = {
-          promise.success(clT.fromByteBuffer(0, result))
+          promise.success(clB.fromByteBuffer(0, result))
           clEnqueueUnmapMemObject(queue, resBuffer.get, result, 0, null, null)
           clReleaseMemObject(resBuffer.get)
         }

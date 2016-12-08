@@ -2,28 +2,13 @@ package de.qaware.chronix
 
 import scala.collection.Map
 
-abstract class CLProgramSource extends Product /*with HashcodeCaching*/ {
+abstract class CLProgramSource extends Product with Serializable {
   val fp64 = "#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n"
-  def accessors = Map.empty[CLType[_], String]
-  def accessor[T]()(implicit clT: CLType[T]) = {
-    (clT -> s"__chronix_${clT.clName}")
-  }
+  def accessors = Set.empty[CLType[_]]
   def header = {
-    Iterator(fp64) ++ accessors.iterator.flatMap({case (clT : CLType[_], id: String) => {
-      Iterator(
-        s"inline ${clT.clName} ${id}_get(__global char *buffer, long i) {\n",
-        "  ", clT.getter, "\n",
-        "}\n",
-        s"inline void ${id}_set(${clT.clName} v, __global char *buffer, long i) {\n",
-        "  ", clT.setter, "\n",
-        "}\n"
-      )
-    }})
+    Iterator(fp64) ++
+      accessors.iterator.map(_.header)
   }
-  def set[T: CLType](a : String, i : String, v : String) =
-    accessors(implicitly[CLType[T]]) ++ s"_set($v, $a, $i)"
-  def get[T: CLType](a : String, i : String) =
-    accessors(implicitly[CLType[T]]) ++ s"_get($a, $i)"
   def generateSource : Array[String]
 }
 
@@ -40,43 +25,45 @@ case class MapReduceKernel[A, B](
   implicit val clA: CLType[A],
   implicit val clB: CLType[B]
 ) extends CLProgramSource {
-  override def accessors = super.accessors + accessor[A] + accessor[B] ++ f.accessors
+  override def accessors = super.accessors + clA + clB ++ f.accessors
+  def A = clA.clName
+  def B = clB.clName
   def genReduceFunction(fresh_ids: Iterator[String]) : (Iterator[String], String) = {
     val r = fresh_ids.next()
     (Iterator(
-      s"inline ${clB.clName} $r(${clB.clName} x, ${clB.clName} y) {\n",
+      s"inline $B $r($B x, $B y) {\n",
         "  ", reduceBody, "\n",
       "}\n"
     ), r)
   }
   def main(r: String, f:String) = Iterator(
     "__kernel\n",
-    s"__attribute__((vec_type_hint(${clA.clName})))\n",
-    "void reduce(__global char *restrict input, __global char *restrict output, __local char *restrict scratch, long size) {\n") ++ (if(cpu) Iterator(
-      s"${clB.clName} cur = $identity\n",
+    s"__attribute__((vec_type_hint($A)))\n",
+    s"void reduce(__global $A *restrict input, __global $B *restrict output, __local $B *restrict scratch, long size) {\n") ++ (if(cpu) Iterator(
+      s"$B cur = $identity\n",
       "for(long i=0; i<size; ++i) {\n",
-      s"  cur = $r(cur, $f(", get[A]("input", "i"), "))\n",
+      s"  cur = $r(cur, $f(input[i]));\n",
       "}\n",
-      set[B]("output", "cur", "0"), ";\n",
+      "output[cur] = 0;\n",
       "}"
     ) else Iterator(
       "int tid = get_local_id(0);\n",
       "long i = get_group_id(0) * get_local_size(0) + get_local_id(0);\n",
       "long gridSize = get_local_size(0) * get_num_groups(0);\n",
-      s"${clB.clName} cur = $identity;\n",
+      s"$B cur = $identity;\n",
       "for (; i<size; i = i + gridSize){\n",
-      s"  cur = $r(cur, $f(", get[A]("input", "i"), "));\n",
+      s"  cur = $r(cur, $f(input[i]));\n",
       "}\n",
-      set[B]("scratch", "tid", "cur"), ";\n",
+      "scratch[tid] = cur;\n",
       "barrier(CLK_LOCAL_MEM_FENCE);\n",
       "for (int s = get_local_size(0) / 2; s>0; s = s >> 1){\n",
       "  if (tid<s){\n",
-      set[B]("scratch", "tid", s"$r(${get[B]("scratch", "tid")}, ${get[B]("scratch", "tid+s")})"), ";\n",
+      s"scratch[tid] = $r(scratch[tid], scratch[tid+s]);\n",
       "  }\n",
       "  barrier(CLK_LOCAL_MEM_FENCE);\n",
       "}\n",
       "if (tid==0){\n",
-      "  ", set[B]("output", "get_group_id(0)", get[B]("scratch", "0")), ";\n",
+      "  output[get_group_id(0)] = scratch[0];\n",
       "}\n",
       "}\n"
       ))
@@ -86,6 +73,21 @@ case class MapReduceKernel[A, B](
     val (rsrc, rsymb) = genReduceFunction(supply)
     header ++ fsrc ++ rsrc ++ main(rsymb, fsymb)
   }.toArray
+  def precomposeMap[C](m: MapKernel[C,A])(implicit clC: CLType[C]) = {
+    MapReduceKernel(
+      m.compose(f),
+      reduceBody,
+      identity,
+      cpu,
+      clC, clB
+    )
+  }
+  def stage2 =
+    this.copy(f = MapKernel.identity[B], clA = clB)
+}
+
+object MapKernel {
+  def identity[A]()(implicit clA: CLType[A]) = MapFunction[A,A]("return x;", clA, clA)
 }
 
 abstract class MapKernel[A, B]()(implicit clA: CLType[A], clB: CLType[B]) extends CLProgramSource {
@@ -93,16 +95,25 @@ abstract class MapKernel[A, B]()(implicit clA: CLType[A], clB: CLType[B]) extend
   override def generateSource = {
     val supply = CLProgramSource.freshSupply
     val (code, f) = genMapFunction(supply)
-    header ++ code ++ main(f)
+    header ++ code ++ main(f, supply)
   }.toArray
-  override def accessors = super.accessors + accessor[A] + accessor[B]
-  def main(f: String) : Iterator[String] = Iterator(
-    "__kernel __attribute__((vec_type_hint(", implicitly[CLType[B]].clName, ")))\n",
-    "void map(__global char *input, __global char *output) {\n",
+  override def accessors = super.accessors + clA + clB
+  def A = clA.clName
+  def B = clB.clName
+  def main(f: String, fresh_ids: Iterator[String]) : Iterator[String] = Iterator(
+    s"__kernel __attribute__((vec_type_hint($B)))\n",
+    s"void map(__global $A *input, __global $B *output) {\n",
     "  long i = get_global_id(0);\n",
-    s"  ${accessors(clB)}_set($f(${accessors(clA)}_get(input, i)), output, i);\n",
+    s"  output[i] = $f(input[i]);\n",
     "}\n"
   )
+  def compose[C: CLType](g:MapKernel[B,C]) : MapKernel[A,C] =
+    if(this == MapKernel.identity[A])
+      g.asInstanceOf[MapKernel[A,C]]
+    else if(g == MapKernel.identity[B])
+      this.asInstanceOf[MapKernel[A,C]]
+    else
+      MapComposition(this, g, implicitly[CLType[A]], implicitly[CLType[B]], implicitly[CLType[C]])
 }
 
 case class InplaceMap[A, B] (
@@ -111,13 +122,30 @@ case class InplaceMap[A, B] (
 {
   override def accessors = super.accessors ++ kernel.accessors
   override def genMapFunction(fresh_ids: Iterator[String]) = kernel.genMapFunction(fresh_ids)
-  override def main(f: String) : Iterator[String] = Iterator(
-    "__kernel __attribute__((vec_type_hint(", implicitly[CLType[B]].clName, ")))\n",
-    "void map(__global char *input) {\n",
-    "  long i = get_global_id(0);\n",
-    s"  ${accessors(clB)}_set($f(${accessors(clA)}_get(input, i)), input, i);\n",
-    "}\n"
-  )
+  override def main(f: String, fresh_ids: Iterator[String]) : Iterator[String] = {
+    if(A == B) {
+      Iterator(
+        s"__kernel __attribute__((vec_type_hint($B)))\n",
+        s"void map(__global $A *input) {\n",
+        "  long i = get_global_id(0);\n",
+        s"  input[i] = $f(input[i]);\n",
+        "}\n"
+      )
+    } else {
+      val union_t = "union " ++ fresh_ids.next()
+      Iterator(
+        s"$union_t {\n",
+        s"  $A __$A;\n",
+        s"  $B __$B;\n",
+        "};\n",
+        s"__kernel __attribute__((vec_type_hint($B)))\n",
+        s"void map(__global $union_t *input) {\n",
+        "  long i = get_global_id(0);\n",
+        s"  input[i].__$B = $f(input[i].__$A);\n",
+        "}\n"
+      )
+    }
+  }
 }
 
 case class MapComposition[A: CLType, B: CLType, C: CLType] (
@@ -126,13 +154,14 @@ case class MapComposition[A: CLType, B: CLType, C: CLType] (
   clA: CLType[A], clB: CLType[B], clC: CLType[C]
 ) extends MapKernel[A,C]
 {
+  def C = clC.clName
   override def accessors = super.accessors ++ f.accessors ++ g.accessors
   override def genMapFunction(fresh_ids: Iterator[String]) = {
     val (fsrc, fsymb) = f.genMapFunction(fresh_ids)
     val (gsrc, gsymb) = g.genMapFunction(fresh_ids)
     val h = fresh_ids.next()
     (fsrc ++ gsrc ++ Iterator(
-      s"inline ${clC.clName} $h(${clA.clName} x) {\n",
+      s"inline $C $h($A x) {\n",
       s"  return $gsymb($fsymb(x));\n",
       "}\n"
     ), h)
@@ -144,10 +173,12 @@ case class MapFunction[A: CLType, B: CLType](
   clA: CLType[A], clB: CLType[B]
 ) extends MapKernel[A,B]
 {
-  override def genMapFunction(fresh_ids: Iterator[String]) = {
+  override def genMapFunction(fresh_ids: Iterator[String]) : (Iterator[String], String) = {
+    if(this == MapKernel.identity[A])
+      return (Iterator(), "")
     val f = fresh_ids.next()
     (Iterator(
-      s"inline ${clB.clName} $f(${clA.clName} x) {\n",
+      s"inline $B $f($A x) {\n",
       "  ", body, "\n",
       "}\n"
     ), f)
