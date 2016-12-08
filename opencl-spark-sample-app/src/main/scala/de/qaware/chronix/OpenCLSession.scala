@@ -142,6 +142,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * parallelization happens outside Chunks for CPU
    * for GPU this could be tuned (possibly depending on operation types)
    * values other than 1 will lead to wrong results on CPU (and wasted time)
+   * nlocal is taken as an upper bound, depending on operand size
    */
   var ngroups : Long = if(OpenCL.CPU) 1 else 8*1024
   var nlocal : Long = if(OpenCL.CPU) 1 else 128
