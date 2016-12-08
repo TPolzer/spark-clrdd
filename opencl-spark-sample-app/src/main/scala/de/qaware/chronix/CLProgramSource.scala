@@ -40,11 +40,11 @@ case class MapReduceKernel[A, B](
     "__kernel\n",
     s"__attribute__((vec_type_hint($A)))\n",
     s"void reduce(__global $A *restrict input, __global $B *restrict output, __local $B *restrict scratch, long size) {\n") ++ (if(cpu) Iterator(
-      s"$B cur = $identity\n",
+      s"$B cur = $identity;\n",
       "for(long i=0; i<size; ++i) {\n",
       s"  cur = $r(cur, $f(input[i]));\n",
       "}\n",
-      "output[cur] = 0;\n",
+      "output[0] = cur;\n",
       "}"
     ) else Iterator(
       "int tid = get_local_id(0);\n",

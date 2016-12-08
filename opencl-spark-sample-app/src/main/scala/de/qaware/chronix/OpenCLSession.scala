@@ -144,7 +144,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * values other than 1 will lead to wrong results on CPU (and wasted time)
    */
   var ngroups : Long = if(OpenCL.CPU) 1 else 8*1024
-  var nlocal : Long = if(OpenCL.CPU) 1 else 128
+  var nlocal : Long = if(OpenCL.CPU) 1 else 64
 
  
   def reduceChunk[A, B](input: Chunk[A], kernel: MapReduceKernel[A,B])(implicit clA: CLType[A], clB: CLType[B]): Future[B] = {
