@@ -14,10 +14,15 @@ import scala.concurrent.ExecutionContext.Implicits.global
 object CLRDD
 {
   @transient lazy private val sc = SparkContext.getOrCreate
-  def wrap[T : ClassTag : CLType](wrapped: RDD[T]) = {
+  def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Option[Long] = None) = {
     val partitions = sc.broadcast(wrapped.partitions)
+    val elementSize = implicitly[CLType[T]].sizeOf
+    var chunkSize = expectedPartitionSize.map(_*elementSize).getOrElse(256*1024*1024L)
+    while(chunkSize > Int.MaxValue) {
+      chunkSize = (chunkSize + 1)/2
+    }
     val partitionsRDD = wrapped.mapPartitionsWithIndex( { case (idx: Int, _) =>
-        Iterator(new CLWrapPartition[T](partitions.value(idx), wrapped).asInstanceOf[CLPartition[T]]) } )
+        Iterator(new CLWrapPartition[T](partitions.value(idx), wrapped, chunkSize.toInt).asInstanceOf[CLPartition[T]]) } )
     new CLRDD[T](partitionsRDD, wrapped)
   }
 }
@@ -69,13 +74,13 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
   }
 }
 
-class CLWrapPartition[T : CLType] (val parentPartition: Partition, val parentRDD: RDD[T])
+class CLWrapPartition[T : CLType] (val parentPartition: Partition, val parentRDD: RDD[T], val chunkSize: Int)
   extends CLPartition[T]
 {
   override def src : (OpenCLSession, Iterator[OpenCL.Chunk[T]]) = {
     val ctx = TaskContext.get
     val session = OpenCL.get
-    (session, session.stream(parentRDD.iterator(parentPartition, ctx)))
+    (session, session.stream(parentRDD.iterator(parentPartition, ctx), chunkSize))
   }
 }
 

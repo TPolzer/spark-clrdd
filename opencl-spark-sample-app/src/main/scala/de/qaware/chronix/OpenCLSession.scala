@@ -297,7 +297,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * Put the contents of an iterator on the gpu in constant sized chunks (default 128MB size).
    * Chunks have to be closed after use
    */
-  def stream[T](it: Iterator[T], groupSize: Int = 1024*1024*128)(implicit clT: CLType[T]) : Iterator[Chunk[T]] = new Iterator[Chunk[T]](){
+  def stream[T](it: Iterator[T], groupSize: Int = 1024*1024*256)(implicit clT: CLType[T]) : Iterator[Chunk[T]] = new Iterator[Chunk[T]](){
     override def hasNext = it.hasNext
     override def next = {
       var on_device : Option[cl_mem] = None
