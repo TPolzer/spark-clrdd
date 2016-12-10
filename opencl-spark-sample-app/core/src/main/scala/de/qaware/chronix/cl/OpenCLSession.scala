@@ -1,4 +1,4 @@
-package de.qaware.chronix
+package de.qaware.chronix.cl
 
 import org.jocl.CL._
 import org.jocl._
@@ -31,6 +31,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     extends Iterator[T] with java.io.Closeable
   {
     private val Chunk(elems, _, handle, inputReady) = chunk
+    log.warn("Iterator keeping chunk {}", handle)
     clRetainMemObject(handle)
     clRetainEvent(inputReady)
     var outputReady : cl_event = null
@@ -80,6 +81,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         clEnqueueUnmapMemObject(queue, handle, b, 0, null, null)
         safeReleaseEvent(outputReady)
       })
+      log.warn("Iterator releasing chunk {}", handle)
       clReleaseMemObject(handle)
       safeReleaseEvent(inputReady)
       rawBuffer = None

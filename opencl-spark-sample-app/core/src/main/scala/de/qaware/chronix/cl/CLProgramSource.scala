@@ -1,4 +1,4 @@
-package de.qaware.chronix
+package de.qaware.chronix.cl
 
 import scala.collection.Map
 

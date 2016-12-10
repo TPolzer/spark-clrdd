@@ -1,3 +1,4 @@
 dependencies {
     compile project(':common')
+    compile group: 'org.scala-lang', name: 'scala-reflect', version: '2.11.8'
 }

@@ -1,4 +1,4 @@
-package de.qaware.chronix
+package de.qaware.chronix.cl
 
 import org.apache.spark.rdd._
 import org.apache.spark._
@@ -57,7 +57,7 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
     wrapped.map(_.count).fold(0L)(_+_)
   }
   
-  def sum(implicit num: CLNumeric[T]) : T = {
+  def sum(implicit num: Numeric[T]) : T = {
     wrapped.map(_.sum).reduce(num.plus(_, _))
   }
 
@@ -129,13 +129,13 @@ trait CLPartition[T] {
     })
     Await.result(future, Duration.Inf)
   }
-  def sum(implicit clT: CLNumeric[T]) : T = reduce(MapReduceKernel(
+  def sum(implicit clT: CLType[T], num: Numeric[T]) : T = reduce(MapReduceKernel(
     MapKernel.identity[T],
     "return x+y;",
     clT.zeroName,
     OpenCL.CPU,
     clT, clT
-  ), clT.zero, ((x: T, y: T) => clT.plus(x,y)))
+  ), num.zero, ((x: T, y: T) => num.plus(x,y)))
 
   def map[B](functionBody: String)(implicit clT: CLType[T], clB: CLType[B]) : CLPartition[B] = {
     new CLMapPartition[T, B](functionBody, this)
@@ -181,7 +181,7 @@ class CLMapPartition[A, B](val functionBody: String, val parent: CLPartition[A])
     }
   }
   override def src = {
-    composed(MapFunction[B,B]("return x;", clB, clB))
+    composed(MapKernel.identity[B])
   }
   override def reduce[C](kernel: MapReduceKernel[B, C], e: C, combine: (C,C) => C)
       (implicit clB: CLType[B], clC: CLType[C]) : C = {

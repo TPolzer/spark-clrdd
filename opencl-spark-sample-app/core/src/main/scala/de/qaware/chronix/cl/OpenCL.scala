@@ -1,4 +1,4 @@
-package de.qaware.chronix
+package de.qaware.chronix.cl
 
 import org.jocl._
 import org.jocl.CL._
@@ -100,6 +100,7 @@ object OpenCL
     clRetainMemObject(handle)
     clRetainEvent(ready)
     override def close : Unit = {
+      LoggerFactory.getLogger(getClass).warn("closing chunk {}", this)
       if(handle != null)
         clReleaseMemObject(handle)
       if(ready != null)

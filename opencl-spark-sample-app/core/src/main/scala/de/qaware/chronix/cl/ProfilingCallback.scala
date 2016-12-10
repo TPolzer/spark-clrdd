@@ -1,4 +1,4 @@
-package de.qaware.chronix
+package de.qaware.chronix.cl
 
 import org.jocl._
 import org.jocl.CL._
