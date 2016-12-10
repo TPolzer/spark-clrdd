@@ -7,7 +7,7 @@ import java.nio.ByteBuffer
 trait CLType[T] {
   val clName: String
   val sizeOf: Int
-  val header: String = "" // has to be idempotent, define struct here
+  def header: String = "" // has to be idempotent, define struct here
   def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer): T
   def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: T): Unit
  
@@ -22,13 +22,17 @@ trait CLType[T] {
 }
 
 trait CLNumeric[T] extends CLType[T] with Numeric[T] {
-  val zeroName: String
+  val zeroName = s"(($clName)0)"
 }
 
+/*
+ * The following is a huge amount of boilerplate that could theoretically be
+ * generated at compile time. 
+ */
 object CLType {
   trait CLFloat extends CLNumeric[Float] {
     override val clName = "float"
-    override val zeroName = "0.0"
+    override val zeroName = "0.0f"
     override val sizeOf = Sizeof.cl_float
     override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
       rawBuffer.order(ByteOrder.nativeOrder).getFloat(idx * sizeOf)
@@ -53,6 +57,7 @@ object CLType {
   trait CLLong extends CLNumeric[Long] {
     override val clName = "long"
     override val zeroName = "0L"
+    override def header = "#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n"
     override val sizeOf = Sizeof.cl_long
     override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
       rawBuffer.order(ByteOrder.nativeOrder).getLong(idx * sizeOf)
@@ -74,7 +79,46 @@ object CLType {
     }
   }
   implicit object CLInt extends CLInt with Numeric.IntIsIntegral with Ordering.IntOrdering
-  class CLVector2[T](implicit clT: CLType[T]) extends CLType[(T,T)] with Serializable {
+  trait CLByte extends CLNumeric[Byte] {
+    override val clName = "char"
+    override val sizeOf = Sizeof.cl_char
+    override def header = "#pragma OPENCL EXTENSION cl_khr_byte_addressable_store : enable\n"
+    override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
+      rawBuffer.order(ByteOrder.nativeOrder).get(idx * sizeOf)
+    }
+    override def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: Byte) = {
+      rawBuffer.order(ByteOrder.nativeOrder).put(idx * sizeOf, v)
+    }
+  }
+  implicit object CLByte extends CLByte with Numeric.ByteIsIntegral with Ordering.ByteOrdering
+  trait CLChar extends CLNumeric[Char] {
+    override val clName = "short"
+    override val zeroName = "((short)0)"
+    override val sizeOf = Sizeof.cl_short
+    override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
+      rawBuffer.order(ByteOrder.nativeOrder).getChar(idx * sizeOf)
+    }
+    override def toByteBuffer(idx: Int, rawBuffer: ByteBuffer, v: Char) = {
+      rawBuffer.order(ByteOrder.nativeOrder).putChar(idx * sizeOf, v)
+    }
+  }
+  implicit object CLChar extends CLChar with Numeric.CharIsIntegral with Ordering.CharOrdering
+  class T2Numeric[T: Numeric] extends Numeric[(T,T)] {
+    import Numeric.Implicits._
+    def nt = implicitly[Numeric[T]]
+    override def fromInt(x: Int): (T, T) = (nt.fromInt(x), nt.fromInt(x))
+    override def negate(x: (T, T)): (T, T) = (-x._1, -x._2)
+    override def minus(x: (T, T),y: (T, T)): (T, T) = x + (-y)
+    override def plus(x: (T, T),y: (T, T)): (T, T) = (x._1 + y._1, x._2 + y._2)
+    override def times(x: (T, T),y: (T, T)): (T, T) = ???
+    override def toDouble(x: (T, T)): Double = ???
+    override def toFloat(x: (T, T)): Float = ???
+    override def toInt(x: (T, T)): Int = ???
+    override def toLong(x: (T, T)): Long = ???
+    override def compare(x: (T, T),y: (T, T)): Int = implicitly[Ordering[(T,T)]].compare(x, y)
+  }
+  class CLVector2[T: Numeric](implicit clT: CLType[T]) extends T2Numeric[T] with CLNumeric[(T,T)] with Serializable {
+    override def header = clT.header
     override val clName = clT.clName + "2"
     override val sizeOf = clT.sizeOf * 2
     override def fromByteBuffer(idx: Int, rawBuffer: ByteBuffer) = {
@@ -87,6 +131,8 @@ object CLType {
   }
   implicit val CLFloat2 = new CLVector2[Float]
   implicit val CLDouble2 = new CLVector2[Double]
+  implicit val CLByte2  = new CLVector2[Byte]
+  implicit val CLChar2  = new CLVector2[Char]
   implicit val CLInt2 = new CLVector2[Int]
   implicit val CLLong2  = new CLVector2[Long]
 }
