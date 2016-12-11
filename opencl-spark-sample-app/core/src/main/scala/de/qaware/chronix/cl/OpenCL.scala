@@ -79,6 +79,11 @@ object OpenCL
     def apply(mem: cl_mem) : KernelArg = KernelArg(Pointer.to(mem), Sizeof.cl_mem)
     def apply(i: Int) : KernelArg = KernelArg(Pointer.to(Array(i)), Sizeof.cl_int)
     def apply(i: Long) : KernelArg = KernelArg(Pointer.to(Array(i)), Sizeof.cl_long)
+    def apply(c: Chunk[_]) : KernelArg = KernelArg(c.handle)
+    def apply(option: Option[Chunk[_]]) : KernelArg = option match {
+      case None => KernelArg(new Pointer(),Sizeof.cl_mem)
+      case Some(c) => KernelArg(c)
+    }
   }
 
   case class Dimensions (
@@ -100,7 +105,7 @@ object OpenCL
     clRetainMemObject(handle)
     clRetainEvent(ready)
     override def close : Unit = {
-      LoggerFactory.getLogger(getClass).warn("closing chunk {}", this)
+      LoggerFactory.getLogger(getClass).info("closing chunk {}", this)
       if(handle != null)
         clReleaseMemObject(handle)
       if(ready != null)

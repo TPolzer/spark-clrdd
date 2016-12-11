@@ -31,7 +31,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     extends Iterator[T] with java.io.Closeable
   {
     private val Chunk(elems, _, handle, inputReady) = chunk
-    log.warn("Iterator keeping chunk {}", handle)
+    log.info("Iterator keeping chunk {}", handle)
     clRetainMemObject(handle)
     clRetainEvent(inputReady)
     var outputReady : cl_event = null
@@ -81,7 +81,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         clEnqueueUnmapMemObject(queue, handle, b, 0, null, null)
         safeReleaseEvent(outputReady)
       })
-      log.warn("Iterator releasing chunk {}", handle)
+      log.info("Iterator releasing chunk {}", handle)
       clReleaseMemObject(handle)
       safeReleaseEvent(inputReady)
       rawBuffer = None
@@ -98,7 +98,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         val res = Program(program) // finalize if buildProgram throws
         import org.apache.commons.lang.builder.ReflectionToStringBuilder
         if(log.isInfoEnabled)
-          log.info("building program: {}", source.flatten)
+          log.info("building program: {}", source.fold("")(_+_))
         clBuildProgram(res.program, 0, null, "-cl-unsafe-math-optimizations", null, null)
       res
       }
@@ -274,6 +274,31 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }
   }
 
+  def mapSliding[A, B](input: Chunk[A], neighbour: Option[Chunk[A]], kernel: WindowReduction[A,B], width: Int)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
+    val ready = new cl_event
+    var handle: Option[cl_mem] = None
+    val neighbourSize = neighbour.map(_.size).getOrElse(0L)
+    val outputSize = input.size - Math.max(0, width - 1 - neighbourSize)
+    val dimensions = Dimensions(1, Array(0), Array(outputSize), null)
+    try {
+      handle = Some(clCreateBuffer(context, 0, outputSize*clB.sizeOf, null, null))
+      val kernelArgs = KernelArg(input.handle) :: KernelArg(neighbour) ::
+        KernelArg(handle.get) :: KernelArg(input.size) :: KernelArg(width) :: Nil
+      val eventList = Array(input.ready) ++ neighbour.map(n => Array[cl_event](n.ready)).getOrElse(Array[cl_event]())
+      callKernel(
+        kernel, "reduce",
+        kernelArgs,
+        eventList,
+        dimensions,
+        ready
+      )
+      new Chunk[B](outputSize, outputSize*clB.sizeOf, handle.get, ready)
+    } finally {
+      safeReleaseEvent(ready)
+      handle.foreach(clReleaseMemObject)
+    }
+  }
+
   val ALLOC_HOST_PTR_ON_DEVICE = {
     /*
      * This decides if writing to a host mapped ALLOC_HOST_PTR buffer is
@@ -341,6 +366,34 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         on_host.foreach(clReleaseMemObject)
         on_device.foreach(clReleaseMemObject)
       }
+    }
+  }
+
+  def chunkFromBytes[T](bytes: Array[Byte])(implicit clT: CLType[T]) : Option[Chunk[T]] = {
+    if(bytes.size == 0) return None
+    var handle : Option[cl_mem] = None
+    var event: cl_event = null
+    try {
+      handle = Some(clCreateBuffer(context, CL_MEM_COPY_HOST_PTR, bytes.size, Pointer.to(bytes), null))
+      event = clCreateUserEvent(context, null)
+      clSetUserEventStatus(event, CL_COMPLETE)
+      val size = bytes.size/clT.sizeOf
+      Some(Chunk(size, size, handle.get, event))
+    } finally {
+      handle.foreach(clReleaseMemObject)
+      safeReleaseEvent(event)
+    }
+  }
+
+  def bytesFromChunk[T](chunk: Chunk[T], count: Int, destructive: Boolean)(implicit clT: CLType[T]) : Array[Byte] = {
+    try {
+      assert(chunk.size >= count)
+      val res = new Array[Byte](count * clT.sizeOf)
+      clEnqueueReadBuffer(queue, chunk.handle, true, 0, res.size, Pointer.to(res), 1, Array(chunk.ready), null)
+      res
+    } finally {
+      if(destructive)
+        chunk.close
     }
   }
 

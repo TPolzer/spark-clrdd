@@ -27,6 +27,9 @@ object CLRDD
   }
 }
 
+/*
+ * wrapped has to contain exactly ONE CLPartition value per RDD partition
+ */
 class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentRDD: RDD[_])
   extends RDD[T](wrapped)
 {
@@ -51,6 +54,34 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
 
   def map[B : CLType : ClassTag](functionBody: String) : CLRDD[B] = {
     new CLRDD(wrapped.map(_.map[B](functionBody)), parentRDD)
+  }
+
+  def movingAverage(width: Int)(implicit evidence: T => Double) = {
+    sliding[Double](width,
+      s"""double res = 0;
+      for(int i=0; i<width; ++i)
+        res += GET(i);
+      return res/width;"""
+    )
+  }
+
+  def sliding[B: CLType : ClassTag](width: Int, functionBody: String) = {
+    val partitionFringes = wrapped.mapPartitionsWithIndex({case (i: Int, it: Iterator[CLPartition[T]]) => {
+      val partition = it.next
+      it.hasNext
+      if(i == 0) {
+        Iterator(Array[Byte]())
+      } else {
+        val (session, chunks) = partition.get
+        Iterator(session.bytesFromChunk(chunks.next, width-1, !partition.doCache))
+      }
+    }}).collect
+    new CLRDD(wrapped.mapPartitionsWithIndex[CLPartition[B]]({ case (i: Int, it: Iterator[CLPartition[T]]) => {
+      val fringe = partitionFringes((i+1)%partitionFringes.size)
+      val res = Iterator(new CLSlidingPartition[T, B](functionBody, width, fringe, it.next))
+      it.hasNext
+      res
+    }}), parentRDD)
   }
 
   override def count : Long = {
@@ -107,8 +138,8 @@ trait CLPartition[T] {
     _doCache = true
   }
   def uncache = {
+    _doCache = false
     if(storage != null) {
-      _doCache = false
       storage.foreach(_.close)
       storage = null
       session = null
@@ -116,6 +147,7 @@ trait CLPartition[T] {
   }
   def reduce[B](kernel: MapReduceKernel[T, B], e: B, combine: (B,B) => B)
       (implicit clT: CLType[T], clB: CLType[B]) : B = {
+    log.info("reducing {} with {}", Array(this, kernel))
     val (session, chunks) = get
     val future = chunks.map(chunk => {
       try {
@@ -189,5 +221,31 @@ class CLMapPartition[A, B](val functionBody: String, val parent: CLPartition[A])
       super.reduce(kernel, e, combine)
     else
       parent.reduce(kernel.precomposeMap(f), e, combine)
+  }
+}
+
+class CLSlidingPartition[A, B](val functionBody: String, val width: Int, val fringe: Array[Byte], val parent: CLPartition[A])(implicit clA: CLType[A], clB: CLType[B])
+  extends CLPartition[B]
+{
+  @transient private lazy val log = LoggerFactory.getLogger(getClass)
+  val f = WindowReduction[A, B](functionBody, clA, clB)
+  override def src = {
+    val (session, parentChunks : Iterator[OpenCL.Chunk[A]]) = parent.get
+    val fringeChunk : Option[OpenCL.Chunk[A]] = session.chunkFromBytes[A](fringe)
+    val (it, nit) = parentChunks.map(Some(_)).duplicate
+    nit.next()
+    val zipped = it.zip(nit ++ Iterator(fringeChunk))
+    val mappedChunks = zipped.map({case (Some(c), nc) => {
+      try{
+        session.mapSliding(c, nc, f, width)
+        } finally {
+          if(nc eq fringeChunk)
+            nc.foreach(_.close)
+          if(!parent.doCache) {
+            c.close
+          }
+        }
+    }})
+    (session, mappedChunks)
   }
 }
