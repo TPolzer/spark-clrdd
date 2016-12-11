@@ -96,7 +96,7 @@ trait CLPartition[T] {
       if(storage == null) {
         val res = src
         session = res._1
-        storage = res._2.toArray
+        storage = res._2.toArray // TODO potentially leaking Chunks on error
       }
       (session, storage.iterator)
     } else {
