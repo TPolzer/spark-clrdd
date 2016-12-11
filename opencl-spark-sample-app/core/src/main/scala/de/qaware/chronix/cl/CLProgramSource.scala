@@ -9,13 +9,9 @@ abstract class CLProgramSource extends Product with Serializable {
     Iterator(fp64) ++
       accessors.iterator.map(_.header)
   }
-  def generateSource : Array[String]
+  def generateSource(supply: Iterator[String]) : Array[String]
 }
 
-object CLProgramSource {
-  def freshSupply = Iterator.from(0)
-    .map(i => s"__chronix_generated_$i")
-}
 
 case class MapReduceKernel[A, B](
   f: MapKernel[A,B],
@@ -67,8 +63,7 @@ case class MapReduceKernel[A, B](
       "}\n",
       "}\n"
       ))
-  override def generateSource = {
-    val supply = CLProgramSource.freshSupply
+  override def generateSource(supply: Iterator[String]) = {
     val (fsrc, fsymb) = f.genMapFunction(supply)
     val (rsrc, rsymb) = genReduceFunction(supply)
     header ++ fsrc ++ rsrc ++ main(rsymb, fsymb)
@@ -92,8 +87,7 @@ object MapKernel {
 
 abstract class MapKernel[A, B]()(implicit clA: CLType[A], clB: CLType[B]) extends CLProgramSource {
   def genMapFunction(fresh_ids: Iterator[String]) : (Iterator[String], String) // Source code, function symbol
-  override def generateSource = {
-    val supply = CLProgramSource.freshSupply
+  override def generateSource(supply: Iterator[String]) = {
     val (code, f) = genMapFunction(supply)
     header ++ code ++ main(f, supply)
   }.toArray

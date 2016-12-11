@@ -93,7 +93,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     .entryCapacity(100)
     .loader(new CacheLoader[CLProgramSource,Program](){
       override def load(key: CLProgramSource) : Program = {
-        val source = key.generateSource
+        val source = key.generateSource(Iterator.from(0).map(i => s"__chronix_generated_$i"))
         val program = clCreateProgramWithSource(context, source.size, source.toArray, null, null)
         val res = Program(program) // finalize if buildProgram throws
         import org.apache.commons.lang.builder.ReflectionToStringBuilder
