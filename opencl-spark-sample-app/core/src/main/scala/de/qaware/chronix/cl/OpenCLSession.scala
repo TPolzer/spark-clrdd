@@ -32,7 +32,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   {
     private val Chunk(elems, _, handle, inputReady) = chunk
     log.info("Iterator keeping chunk {}", handle)
-    clRetainMemObject(handle)
+    if(handle != null)
+      clRetainMemObject(handle)
     clRetainEvent(inputReady)
     var outputReady : cl_event = null
     var closed = false
@@ -82,7 +83,8 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
         safeReleaseEvent(outputReady)
       })
       log.info("Iterator releasing chunk {}", handle)
-      clReleaseMemObject(handle)
+      if(handle != null)
+        clReleaseMemObject(handle)
       safeReleaseEvent(inputReady)
       rawBuffer = None
     }
@@ -237,6 +239,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * @param destructive if true, mapping is done in place if possible
    */
   def mapChunk[A,B](input: Chunk[A], kernel: MapKernel[A,B], destructive: Boolean = false)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
+    if(input.size == 0) {
+      return Chunk(0, 0, null, completeEvent())
+    }
     //could be done in place even if sizes dont line up, but with more complex code
     val inplace = destructive && (clA.sizeOf == clB.sizeOf)
     val dimensions = Dimensions(1, Array(0), Array(input.size), null)
@@ -274,21 +279,22 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }
   }
 
-  def mapSliding[A, B](input: Chunk[A], neighbour: Option[Chunk[A]], kernel: WindowReduction[A,B], width: Int)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
+  def mapSliding[A, B](input: Chunk[A], neighbour: Chunk[A], kernel: WindowReduction[A,B], width: Int)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
+    val outputSize = Math.max(0, input.size - Math.max(0, width - 1 - neighbour.size))
+    if(outputSize == 0) {
+      return Chunk(0, 0, null, completeEvent())
+    }
     val ready = new cl_event
     var handle: Option[cl_mem] = None
-    val neighbourSize = neighbour.map(_.size).getOrElse(0L)
-    val outputSize = input.size - Math.max(0, width - 1 - neighbourSize)
     val dimensions = Dimensions(1, Array(0), Array(outputSize), null)
     try {
       handle = Some(clCreateBuffer(context, 0, outputSize*clB.sizeOf, null, null))
       val kernelArgs = KernelArg(input.handle) :: KernelArg(neighbour) ::
         KernelArg(handle.get) :: KernelArg(input.size) :: KernelArg(width) :: Nil
-      val eventList = Array(input.ready) ++ neighbour.map(n => Array[cl_event](n.ready)).getOrElse(Array[cl_event]())
       callKernel(
         kernel, "reduce",
         kernelArgs,
-        eventList,
+        Array(input.ready, neighbour.ready),
         dimensions,
         ready
       )
@@ -369,16 +375,25 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }
   }
 
-  def chunkFromBytes[T](bytes: Array[Byte])(implicit clT: CLType[T]) : Option[Chunk[T]] = {
-    if(bytes.size == 0) return None
-    var handle : Option[cl_mem] = None
-    var event: cl_event = null
-    try {
-      handle = Some(clCreateBuffer(context, CL_MEM_COPY_HOST_PTR, bytes.size, Pointer.to(bytes), null))
-      event = clCreateUserEvent(context, null)
+  def completeEvent() : cl_event = {
+    val event = clCreateUserEvent(context, null)
+    try{
       clSetUserEventStatus(event, CL_COMPLETE)
+      clRetainEvent(event)
+      event
+    } finally {
+      clReleaseEvent(event)
+    }
+  }
+
+  def chunkFromBytes[T](bytes: Array[Byte])(implicit clT: CLType[T]) : Chunk[T] = {
+    var handle : Option[cl_mem] = None
+    val event: cl_event = completeEvent()
+    try {
       val size = bytes.size/clT.sizeOf
-      Some(Chunk(size, size, handle.get, event))
+      if(size == 0) return Chunk(0, 0, null, event)
+      handle = Some(clCreateBuffer(context, CL_MEM_COPY_HOST_PTR, bytes.size, Pointer.to(bytes), null))
+      Chunk(size, size, handle.get, event)
     } finally {
       handle.foreach(clReleaseMemObject)
       safeReleaseEvent(event)
@@ -386,8 +401,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   }
 
   def bytesFromChunk[T](chunk: Chunk[T], count: Int, destructive: Boolean)(implicit clT: CLType[T]) : Array[Byte] = {
+    assert(chunk.size >= count)
+    if(chunk.size == 0) return Array[Byte]()
     try {
-      assert(chunk.size >= count)
       val res = new Array[Byte](count * clT.sizeOf)
       clEnqueueReadBuffer(queue, chunk.handle, true, 0, res.size, Pointer.to(res), 1, Array(chunk.ready), null)
       res

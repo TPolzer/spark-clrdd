@@ -1,5 +1,7 @@
 package de.qaware.chronix.cl
 
+import scala.reflect.ClassTag
+
 import org.jocl._
 import java.nio.ByteOrder
 import java.nio.ByteBuffer
@@ -21,4 +23,13 @@ trait CLType[T] extends Serializable {
   }
   
   val zeroName: String
+
+  /*
+   * helpers to be able to cast values to Double
+   */
+  final type elemType = T
+  type doubleCLType <: CLType[_]
+  val doubleCLInstance : doubleCLType
+  val selfInstance : CLType[elemType]
+  val elemClassTag : ClassTag[elemType]
 }

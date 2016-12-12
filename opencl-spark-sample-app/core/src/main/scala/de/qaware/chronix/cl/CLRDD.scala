@@ -7,6 +7,9 @@ import scala.collection.JavaConverters._
 
 import scala.reflect.ClassTag
 
+import scala.util.Try
+import scala.util.Failure
+import scala.util.Success
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.ExecutionContext.Implicits.global
@@ -56,35 +59,59 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
     new CLRDD(wrapped.map(_.map[B](functionBody)), parentRDD)
   }
 
-  def movingAverage(width: Int)(implicit evidence: T => Double) = {
-    sliding[Double](width,
-      s"""double res = 0;
+  def movingAverage(width: Int)(implicit clT: CLType[T]) : CLRDD[clT.doubleCLInstance.elemType] = {
+    val clRes = clT.doubleCLInstance
+    sliding[clT.doubleCLInstance.elemType](width,
+      s"""${clRes.clName} res = ${clRes.zeroName};
       for(int i=0; i<width; ++i)
-        res += GET(i);
+        res += convert_${clRes.clName}(GET(i));
       return res/width;"""
-    )
+    )(clT.doubleCLInstance.selfInstance, clT.doubleCLInstance.elemClassTag)
   }
 
-  def sliding[B: CLType : ClassTag](width: Int, functionBody: String) = {
-    val partitionFringes = wrapped.mapPartitionsWithIndex({case (i: Int, it: Iterator[CLPartition[T]]) => {
-      val partition = it.next
-      it.hasNext
-      if(i == 0) {
-        Iterator(Array[Byte]())
-      } else {
-        val (session, chunks) = partition.get
-        Iterator(session.bytesFromChunk(chunks.next, width-1, !partition.doCache))
+  def sliding[B: CLType : ClassTag](width: Int, functionBody: String) : CLRDD[B] = {
+    class FastPathImpossible extends Exception
+    val numPartitions = wrapped.partitions.size
+    try{
+      val partitionFringes = wrapped.mapPartitionsWithIndex({case (i: Int, it: Iterator[CLPartition[T]]) => {
+        val partition = it.next
+        it.hasNext
+        if(i == 0) {
+          Iterator(Success(Array[Byte]()))
+        } else {
+          val (session, chunks) = partition.get
+          val chunk = chunks.next
+          val isLast = !chunks.hasNext && i == numPartitions - 1
+          Iterator(
+            if(!isLast && chunk.size < width-1) {
+              if(!partition.doCache)
+                chunk.close
+              Failure(new FastPathImpossible)
+            }
+            else
+              Success(session.bytesFromChunk(chunk, Math.min(width.toLong-1, chunk.size).toInt, !partition.doCache))
+            )
+        }
+      }}).collect
+      val firstFailure = partitionFringes.find(_.isFailure)
+      firstFailure.foreach(_.get) // will rethrow
+      new CLRDD(wrapped.mapPartitionsWithIndex[CLPartition[B]]({ case (i: Int, it: Iterator[CLPartition[T]]) => {
+        val fringe = partitionFringes((i+1)%partitionFringes.size).get
+        val res = Iterator(new CLSlidingPartition[T, B](functionBody, width, fringe, it.next))
+        it.hasNext
+        res
+      }}), parentRDD)
+    } catch {
+      case (_ : FastPathImpossible) => {
+        log.warn("sliding window computation stumbled over a chunk where chunk.size < width-1, collecting whole rdd on driver!")
+        val count = this.count()
+        val newPartitionCount = Math.max(Math.min(numPartitions, count/width), 1).toInt
+        CLRDD.wrap(context.parallelize(this.collect, newPartitionCount)).sliding[B](width, functionBody)
       }
-    }}).collect
-    new CLRDD(wrapped.mapPartitionsWithIndex[CLPartition[B]]({ case (i: Int, it: Iterator[CLPartition[T]]) => {
-      val fringe = partitionFringes((i+1)%partitionFringes.size)
-      val res = Iterator(new CLSlidingPartition[T, B](functionBody, width, fringe, it.next))
-      it.hasNext
-      res
-    }}), parentRDD)
+    }
   }
 
-  override def count : Long = {
+  override def count() : Long = {
     wrapped.map(_.count).fold(0L)(_+_)
   }
   
@@ -231,16 +258,16 @@ class CLSlidingPartition[A, B](val functionBody: String, val width: Int, val fri
   val f = WindowReduction[A, B](functionBody, clA, clB)
   override def src = {
     val (session, parentChunks : Iterator[OpenCL.Chunk[A]]) = parent.get
-    val fringeChunk : Option[OpenCL.Chunk[A]] = session.chunkFromBytes[A](fringe)
-    val (it, nit) = parentChunks.map(Some(_)).duplicate
+    val fringeChunk : OpenCL.Chunk[A] = session.chunkFromBytes[A](fringe)
+    val (it, nit) = parentChunks.duplicate
     nit.next()
     val zipped = it.zip(nit ++ Iterator(fringeChunk))
-    val mappedChunks = zipped.map({case (Some(c), nc) => {
+    val mappedChunks = zipped.map({case (c, nc) => {
       try{
         session.mapSliding(c, nc, f, width)
         } finally {
           if(nc eq fringeChunk)
-            nc.foreach(_.close)
+            nc.close
           if(!parent.doCache) {
             c.close
           }

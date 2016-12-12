@@ -42,6 +42,10 @@ private[macros] class CLTypeGenerator(val c: Context) {
             }
             List(q"""trait $instanceName extends CLType[$scala_t] {
               override val clName = $opencl_t
+              override type doubleCLType = ${TypeName("CLDouble" + nid)}
+              override val doubleCLInstance = ${TermName("CLDouble" + nid)}
+              override val selfInstance = ${TermName(stringName)}
+              override val elemClassTag = implicitly[ClassTag[$scala_t]]
               override val zeroName = ${"((" + opencl_t + ")0)"}
               ${extensions.get(opencl_t1).map(extension =>
                 q"override def header = ${"#pragma OPENCL EXTENSION " + extension + " : enable\n"}")

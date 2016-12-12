@@ -79,11 +79,11 @@ object OpenCL
     def apply(mem: cl_mem) : KernelArg = KernelArg(Pointer.to(mem), Sizeof.cl_mem)
     def apply(i: Int) : KernelArg = KernelArg(Pointer.to(Array(i)), Sizeof.cl_int)
     def apply(i: Long) : KernelArg = KernelArg(Pointer.to(Array(i)), Sizeof.cl_long)
-    def apply(c: Chunk[_]) : KernelArg = KernelArg(c.handle)
-    def apply(option: Option[Chunk[_]]) : KernelArg = option match {
-      case None => KernelArg(new Pointer(),Sizeof.cl_mem)
-      case Some(c) => KernelArg(c)
-    }
+    def apply(c: Chunk[_]) : KernelArg =
+      if(c.size != 0)
+        KernelArg(c.handle)
+      else
+        KernelArg(new Pointer(), Sizeof.cl_mem)
   }
 
   case class Dimensions (
@@ -97,12 +97,15 @@ object OpenCL
   case class Chunk[T] (
     val size: Long, //used elements
     val space: Long, //allocated size in bytes
-    var handle: cl_mem,
-    var ready: cl_event
+    var handle: cl_mem, // handle == null iff (size == 0 || this is closed)
+    var ready: cl_event // ready == null iff this is closed
   )
   extends java.io.Closeable
   {
-    clRetainMemObject(handle)
+    if(handle != null)
+      clRetainMemObject(handle)
+    else
+      assert(size == 0)
     clRetainEvent(ready)
     override def close : Unit = {
       LoggerFactory.getLogger(getClass).info("closing chunk {}", this)
