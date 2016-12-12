@@ -1,1 +1,1 @@
-include 'core', 'common', 'macros'
+include 'core', 'common', 'macros', 'benchmarks'

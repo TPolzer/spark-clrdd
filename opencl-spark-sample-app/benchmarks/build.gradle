@@ -1,0 +1,20 @@
+plugins {
+  id "me.champeau.gradle.jmh" version "0.3.1"
+}
+
+dependencies {
+  compile project(':core')
+  compile group:'org.apache.spark', name: 'spark-core_2.11', version: '2.0.0'
+}
+
+sourceSets {
+    jmh {
+        scala.srcDir 'src/jmh/scala'
+    }
+}
+
+jmh {
+  include = ['.*']
+  jmhVersion = '1.15'
+  duplicateClassesStrategy = 'warn'
+}
