@@ -147,6 +147,11 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
     ), num.zero, ((x: T, y: T) => num.plus(x,y)))
   }
 
+  /*
+   * Cache state is currently not preserved across failures.
+   * This enables computations which need more memory than available to
+   * succeed. On the other hand it goes against the user.
+   */
   def cacheGPU = {
     wrapped.cache
     wrapped.foreach(_.cache)
@@ -202,7 +207,7 @@ trait CLPartition[T] {
   }
   def reduce[B](kernel: MapReduceKernel[T, B], e: B, combine: (B,B) => B)
       (implicit clT: CLType[T], clB: CLType[B]) : B = {
-    log.info("reducing {} with {}", Array(this, kernel))
+    log.trace("reducing {} with {}", Array(this, kernel))
     val (session, chunks) = get
     val future = chunks.map(chunk => {
       try {
