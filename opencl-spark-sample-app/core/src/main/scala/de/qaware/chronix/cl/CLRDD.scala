@@ -114,9 +114,37 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
   override def count() : Long = {
     wrapped.map(_.count).fold(0L)(_+_)
   }
+
+  def reduce[B: ClassTag : CLType](kernel: MapReduceKernel[T, B], e: B, combine: (B,B) => B) : B = {
+    wrapped.map(_.reduce(kernel, e, combine)).reduce(combine)
+  }
+
+  def stats()(implicit evidence: T => Double) : Stats = {
+    val clT = implicitly[CLType[T]]
+    val clS = implicitly[CLType[Stats]]
+    reduce[Stats](
+      MapReduceKernel(
+        MapFunction[T, Stats](
+          Stats.clFromValue,
+          clT, clS),
+        Stats.clMerge,
+        Stats.clZero,
+        OpenCL.CPU,
+        clT, clS),
+      Stats(),
+      (x: Stats, y: Stats) => x.merge(y)
+    )
+  }
   
   def sum(implicit num: Numeric[T]) : T = {
-    wrapped.map(_.sum).reduce(num.plus(_, _))
+    val clT = implicitly[CLType[T]]
+    reduce(MapReduceKernel(
+      MapKernel.identity[T],
+      "return x+y;",
+      clT.zeroName,
+      OpenCL.CPU,
+      clT, clT
+    ), num.zero, ((x: T, y: T) => num.plus(x,y)))
   }
 
   def cacheGPU = {
@@ -188,13 +216,6 @@ trait CLPartition[T] {
     })
     Await.result(future, Duration.Inf)
   }
-  def sum(implicit clT: CLType[T], num: Numeric[T]) : T = reduce(MapReduceKernel(
-    MapKernel.identity[T],
-    "return x+y;",
-    clT.zeroName,
-    OpenCL.CPU,
-    clT, clT
-  ), num.zero, ((x: T, y: T) => num.plus(x,y)))
 
   def map[B](functionBody: String)(implicit clT: CLType[T], clB: CLType[B]) : CLPartition[B] = {
     new CLMapPartition[T, B](functionBody, this)
