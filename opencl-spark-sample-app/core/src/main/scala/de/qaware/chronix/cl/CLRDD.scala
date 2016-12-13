@@ -25,7 +25,7 @@ object CLRDD
       chunkSize = (chunkSize + 1)/2
     }
     val partitionsRDD = wrapped.mapPartitionsWithIndex( { case (idx: Int, _) =>
-        Iterator(new CLWrapPartition[T](partitions.value(idx), wrapped, chunkSize.toInt).asInstanceOf[CLPartition[T]]) } )
+        Iterator(new CLWrapPartition[T](partitions.value(idx), wrapped, chunkSize.toInt, OpenCL.devices(idx % OpenCL.devices.size)).asInstanceOf[CLPartition[T]]) } )
     new CLRDD[T](partitionsRDD, wrapped)
   }
 }
@@ -165,13 +165,12 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
   }
 }
 
-class CLWrapPartition[T : CLType] (val parentPartition: Partition, val parentRDD: RDD[T], val chunkSize: Int)
+class CLWrapPartition[T : CLType] (val parentPartition: Partition, val parentRDD: RDD[T], val chunkSize: Int, val initialSession: OpenCLSession)
   extends CLPartition[T]
 {
   override def src : (OpenCLSession, Iterator[OpenCL.Chunk[T]]) = {
     val ctx = TaskContext.get
-    val session = OpenCL.get
-    (session, session.stream(parentRDD.iterator(parentPartition, ctx), chunkSize))
+    (initialSession, initialSession.stream(parentRDD.iterator(parentPartition, ctx), chunkSize))
   }
 }
 
