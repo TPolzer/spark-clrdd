@@ -9,13 +9,14 @@ import java.util.concurrent.TimeUnit
 @State(Scope.Benchmark)
 @Warmup(iterations = 15, time = 1, timeUnit = TimeUnit.SECONDS)
 @Measurement(iterations = 15, time = 1, timeUnit = TimeUnit.SECONDS)
-@OperationsPerInvocation(10*1024)
+@OperationsPerInvocation(2048)
 @Fork(value = 2, jvmArgsAppend = Array("-Xmx8g"))
 class Benchmarks {
   val sc = new SparkContext("local[*]", "chronix cl benchmark")
+  OpenCL.CPU = true
   sc.setLogLevel("WARN")
 
-  @Param(Array("4", "16", "64", "128", "512", "1024", "2048", "5120"))
+  @Param(Array("4", "16", "64", "128", "512", "1024", "2048"))
   private var size = 128L
   @Param(Array("1", "4", "8", "16", "32"))
   private var partitions = 1
@@ -31,8 +32,8 @@ class Benchmarks {
   def clsum = {
     var res = crdd.to[Double].sum
     var i = size;
-    while(i != 10*1024) {
-      assert(i < 10*1024)
+    while(i != 2048) {
+      assert(i < 2048)
       res += crdd.to[Double].sum
       i += size
     }
@@ -43,12 +44,12 @@ class Benchmarks {
   def clstats = {
     var res = crdd.stats
     var i = size;
-    while(i != 10*1024) {
-      assert(i < 10*1024)
+    while(i != 2048) {
+      assert(i < 2048)
       res = crdd.stats.merge(res)
       i += size
     }
-    assert(res.count == 10L*1024*1024*1024/8, res.count)
+    assert(res.count == 2048L*1024*1024/8, res.count)
     res
   }
   
@@ -56,8 +57,8 @@ class Benchmarks {
   def sum = {
     var res = rdd.sum
     var i = size;
-    while(i != 10*1024) {
-      assert(i < 10*1024)
+    while(i != 2048) {
+      assert(i < 2048)
       res += rdd.sum
       i += size
     }
@@ -68,12 +69,12 @@ class Benchmarks {
   def stats = {
     var res = rdd.stats
     var i = size;
-    while(i != 10*1024) {
-      assert(i < 10*1024)
+    while(i != 2048) {
+      assert(i < 2048)
       res.merge(rdd.stats)
       i += size
     }
-    assert(res.count == 10*1024, res.count)
+    assert(res.count == 2048, res.count)
     res
   }
 }
