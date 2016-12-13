@@ -6,7 +6,6 @@ import org.jocl.CL._
 import org.slf4j.LoggerFactory
 
 object OpenCL
-  extends java.lang.ThreadLocal[OpenCLSession] // supplies one OpenCLSession per device, round-robin over threads
 {
   setExceptionsEnabled(true)
   var CPU = false
@@ -59,9 +58,19 @@ object OpenCL
 
   def safeReleaseEvent(e: cl_event) = if(e != null && e != new cl_event) clReleaseEvent(e)
 
-  override protected def initialValue = {
-    val threadId = java.lang.Thread.currentThread.getId
-    devices((threadId % devices.size.toLong).toInt)
+  val deviceIndex = new java.util.concurrent.atomic.AtomicInteger(0)
+  val updateIndex = new java.util.function.IntUnaryOperator() {
+    override def applyAsInt(i: Int) = {
+      (i + 1) % devices.size
+    }
+  }
+
+  /*
+   * supplies OpenCLSessions round robin over devices
+   */
+  def get() = {
+    val idx = deviceIndex.getAndUpdate(updateIndex)
+    devices(idx)
   }
 
   /**

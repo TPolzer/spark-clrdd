@@ -25,7 +25,7 @@ object CLRDD
       chunkSize = (chunkSize + 1)/2
     }
     val partitionsRDD = wrapped.mapPartitionsWithIndex( { case (idx: Int, _) =>
-        Iterator(new CLWrapPartition[T](partitions.value(idx), wrapped, chunkSize.toInt, OpenCL.devices(idx % OpenCL.devices.size)).asInstanceOf[CLPartition[T]]) } )
+        Iterator(new CLWrapPartition[T](partitions.value(idx), wrapped, chunkSize.toInt, OpenCL.get()).asInstanceOf[CLPartition[T]]) } )
     new CLRDD[T](partitionsRDD, wrapped)
   }
 }

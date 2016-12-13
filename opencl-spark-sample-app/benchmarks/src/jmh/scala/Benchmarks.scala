@@ -13,6 +13,7 @@ object Benchmarks {
 @State(Scope.Benchmark)
 @Warmup(iterations = 15, time = 1, timeUnit = TimeUnit.SECONDS)
 @Measurement(iterations = 10, time = 1, timeUnit = TimeUnit.SECONDS)
+@Timeout(time = 1, timeUnit = TimeUnit.MINUTES)
 @OperationsPerInvocation(Benchmarks.size)
 @Fork(value = 1, jvmArgsAppend = Array("-Xmx8g"))
 class Benchmarks {
