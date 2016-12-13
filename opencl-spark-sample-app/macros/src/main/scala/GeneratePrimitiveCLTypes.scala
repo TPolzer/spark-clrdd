@@ -24,7 +24,7 @@ private[macros] class CLTypeGenerator(val c: Context) {
     "char" -> "cl_khr_byte_addressable_store",
     "double" -> "cl_khr_fp64"
   )
-  val arities = List(1,2,/*3,*/4,8,16) // 3 currently not available in jocl -> https://github.com/gpu/JOCL/issues/13
+  val arities = List(1,2,4,8,16)
   def generate(annottees: c.Expr[Any]*) : c.Expr[Any] = {
     annottees map (_.tree) toList match {
       case q"object ImplicitCLTypes" :: Nil => {
