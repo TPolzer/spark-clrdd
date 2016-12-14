@@ -39,9 +39,10 @@ case class WindowReduction[A, B](
   def main(r: String) = Iterator(
     "__kernel\n",
     s"__attribute__((vec_type_hint($A)))\n",
-    s"void reduce(const __global $A *restrict input, const __global $A *restrict fringe, __global $B *restrict output, long inputSize, int width, int stride, int offset) {\n",
+    s"void reduce(const __global $A *restrict input, const __global $A *restrict fringe, __global $B *restrict output, long outputSize, long inputSize, int width, int stride, int offset) {\n",
     "  long i = get_global_id(0);\n",
-    s"  output[i] = $r(i, input, inputSize, fringe, width, stride, offset);\n",
+    "  if (i < outputSize)\n",
+    s"   output[i] = $r(i, input, inputSize, fringe, width, stride, offset);\n",
     "}\n"
   )
   override def generateSource(supply: Iterator[String]) = {
@@ -133,9 +134,10 @@ abstract class MapKernel[A, B]()(implicit clA: CLType[A], clB: CLType[B]) extend
   def B = clB.clName
   def main(f: String, fresh_ids: Iterator[String]) : Iterator[String] = Iterator(
     s"__kernel __attribute__((vec_type_hint($B)))\n",
-    s"void map(__global $A *input, __global $B *output) {\n",
+    s"void map(__global $A *input, long inputSize, __global $B *output) {\n",
     "  long i = get_global_id(0);\n",
-    s"  output[i] = $f(input[i]);\n",
+    "  if(i < inputSize)\n",
+    s"   output[i] = $f(input[i]);\n",
     "}\n"
   )
   def compose[C: CLType](g:MapKernel[B,C]) : MapKernel[A,C] =
@@ -157,8 +159,9 @@ case class InplaceMap[A, B] (
     if(A == B) {
       Iterator(
         s"__kernel __attribute__((vec_type_hint($B)))\n",
-        s"void map(__global $A *input) {\n",
+        s"void map(__global $A *input, long inputSize) {\n",
         "  long i = get_global_id(0);\n",
+        "  if(i < inputSize)\n",
         s"  input[i] = $f(input[i]);\n",
         "}\n"
       )
@@ -170,8 +173,9 @@ case class InplaceMap[A, B] (
         s"  $B __$B;\n",
         "};\n",
         s"__kernel __attribute__((vec_type_hint($B)))\n",
-        s"void map(__global $union_t *input) {\n",
+        s"void map(__global $union_t *input, long inputSize) {\n",
         "  long i = get_global_id(0);\n",
+        "  if(i < inputSize)\n",
         s"  input[i].__$B = $f(input[i].__$A);\n",
         "}\n"
       )

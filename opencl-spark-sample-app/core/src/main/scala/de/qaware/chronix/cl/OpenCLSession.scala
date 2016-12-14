@@ -244,7 +244,13 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }
     //could be done in place even if sizes dont line up, but with more complex code
     val inplace = destructive && (clA.sizeOf == clB.sizeOf)
-    val dimensions = Dimensions(1, Array(0), Array(input.size), null)
+    /*
+     * For OpenCL <2.0 platforms local work size has to divide global work
+     * size. Restricting the local work size to too small values can harm
+     * performance significantly.
+     */
+    val workSize = (input.size + 127)/128*128
+    val dimensions = Dimensions(1, Array(0), Array(workSize), null)
     val ready = new cl_event
     var handle: Option[cl_mem] = None
     try {
@@ -255,6 +261,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       }
       val kernelArgs = new ArrayBuffer[KernelArg]
       kernelArgs += KernelArg(input.handle)
+      kernelArgs += KernelArg(input.size)
       if(!inplace) {
         handle = Some(clCreateBuffer(context, 0, input.size*clB.sizeOf, null, null))
         kernelArgs += KernelArg(handle.get)
@@ -285,15 +292,21 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       //each computation consumes `stride` additional elements, the first one
       //consumes width elements (`width - stride` more)
       (input.size - offset + Math.min(neighbour.size, width - 1) - (width - stride)) / stride)
+    /*
+     * For OpenCL <2.0 platforms local work size has to divide global work
+     * size. Restricting the local work size to too small values can harm
+     * performance significantly.
+     */
+    val workSize = (outputSize + 127)/128*128
     if(outputSize == 0) {
       return Chunk(0, 0, null, completeEvent())
     }
     val ready = new cl_event
     var handle: Option[cl_mem] = None
-    val dimensions = Dimensions(1, Array(0), Array(outputSize), slidingLocal)
+    val dimensions = Dimensions(1, Array(0), Array(workSize), slidingLocal)
     try {
       handle = Some(clCreateBuffer(context, 0, outputSize*clB.sizeOf, null, null))
-      val kernelArgs = Array(KernelArg(input.handle), KernelArg(neighbour), KernelArg(handle.get),
+      val kernelArgs = Array(KernelArg(input.handle), KernelArg(neighbour), KernelArg(handle.get), KernelArg(outputSize),
         KernelArg(input.size), KernelArg(width), KernelArg(stride), KernelArg(offset))
       callKernel(
         kernel, "reduce",
