@@ -279,8 +279,11 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }
   }
 
-  def mapSliding[A, B](input: Chunk[A], neighbour: Chunk[A], kernel: WindowReduction[A,B], width: Int)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
-    val outputSize = Math.max(0, input.size - Math.max(0, width - 1 - neighbour.size))
+  def mapSliding[A, B](input: Chunk[A], neighbour: Chunk[A], kernel: WindowReduction[A,B], width: Int, stride: Int, offset: Int)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
+    val outputSize = Math.max(0, //outputSize cannot be negative
+      //each computation consumes `stride` additional elements, the first one
+      //consumes width elements (`width - stride` more)
+      (input.size - offset + neighbour.size - (width - stride)) / stride)
     if(outputSize == 0) {
       return Chunk(0, 0, null, completeEvent())
     }
@@ -288,9 +291,10 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     var handle: Option[cl_mem] = None
     val dimensions = Dimensions(1, Array(0), Array(outputSize), null)
     try {
+      log.warn("allocation {} bytes", outputSize*clB.sizeOf)
       handle = Some(clCreateBuffer(context, 0, outputSize*clB.sizeOf, null, null))
-      val kernelArgs = KernelArg(input.handle) :: KernelArg(neighbour) ::
-        KernelArg(handle.get) :: KernelArg(input.size) :: KernelArg(width) :: Nil
+      val kernelArgs = Array(KernelArg(input.handle), KernelArg(neighbour), KernelArg(handle.get),
+        KernelArg(input.size), KernelArg(width), KernelArg(stride), KernelArg(offset))
       callKernel(
         kernel, "reduce",
         kernelArgs,

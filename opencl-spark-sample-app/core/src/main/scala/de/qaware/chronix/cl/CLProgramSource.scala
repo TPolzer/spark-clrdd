@@ -20,9 +20,17 @@ case class WindowReduction[A, B](
   def B = clB.clName
   def genReduceFunction(supply: Iterator[String]) = {
     val r = supply.next()
+    val g = supply.next()
     (Iterator(
-      s"inline $B $r(long idx, const __global $A *primary, long primarySize, const __global $A *secondary, int width) {\n",
-      "#define GET(i) ((idx+i < primarySize) ? primary[idx+i] : secondary[idx+i-primarySize])\n",
+      s"inline $A $g(int i, long idx, const __global $A *primary, long primarySize, const __global $A *secondary, int width, int stride, int offset) {\n",
+      "  long iabs = idx*stride + offset + i;\n",
+      "  if(iabs < primarySize)\n",
+      "    return primary[iabs];\n",
+      "  else\n",
+      "    return secondary[iabs - primarySize];\n",
+      "}\n",
+      s"inline $B $r(long idx, const __global $A *primary, long primarySize, const __global $A *secondary, int width, int stride, int offset) {\n",
+      s"#define GET(i) $g(i, idx, primary, primarySize, secondary, width, stride, offset)\n",
       "  ", reduceBody, "\n",
       "#undef GET\n",
       "}\n"
@@ -31,9 +39,9 @@ case class WindowReduction[A, B](
   def main(r: String) = Iterator(
     "__kernel\n",
     s"__attribute__((vec_type_hint($A)))\n",
-    s"void reduce(const __global $A *restrict input, const __global $A *restrict fringe, __global $B *restrict output, long inputSize, int width) {\n",
+    s"void reduce(const __global $A *restrict input, const __global $A *restrict fringe, __global $B *restrict output, long inputSize, int width, int stride, int offset) {\n",
     "  long i = get_global_id(0);\n",
-    s"  output[i] = $r(i, input, inputSize, fringe, width);\n",
+    s"  output[i] = $r(i, input, inputSize, fringe, width, stride, offset);\n",
     "}\n"
   )
   override def generateSource(supply: Iterator[String]) = {

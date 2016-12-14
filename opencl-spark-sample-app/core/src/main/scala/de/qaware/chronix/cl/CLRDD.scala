@@ -17,6 +17,8 @@ import scala.concurrent.ExecutionContext.Implicits.global
 object CLRDD
 {
   @transient lazy private val sc = SparkContext.getOrCreate
+  def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Long) : CLRDD[T] =
+    wrap(wrapped, Some(expectedPartitionSize))
   def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Option[Long] = None) = {
     val partitions = sc.broadcast(wrapped.partitions)
     val elementSize = implicitly[CLType[T]].sizeOf
@@ -61,7 +63,7 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
 
   def movingAverage(width: Int)(implicit clT: CLType[T]) : CLRDD[clT.doubleCLInstance.elemType] = {
     val clRes = clT.doubleCLInstance
-    sliding[clT.doubleCLInstance.elemType](width,
+    sliding[clT.doubleCLInstance.elemType](width, 1,
       s"""${clRes.clName} res = ${clRes.zeroName};
       for(int i=0; i<width; ++i)
         res += convert_${clRes.clName}(GET(i));
@@ -69,18 +71,19 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
     )(clT.doubleCLInstance.selfInstance, clT.doubleCLInstance.elemClassTag)
   }
 
-  def sliding[B: CLType : ClassTag](width: Int, functionBody: String) : CLRDD[B] = {
+  def sliding[B: CLType : ClassTag](width: Int, stride: Int, functionBody: String) : CLRDD[B] = {
     class FastPathImpossible extends Exception
     val numPartitions = wrapped.partitions.size
     try{
       val partitionFringes = wrapped.mapPartitionsWithIndex({case (i: Int, it: Iterator[CLPartition[T]]) => {
         val partition = it.next
         it.hasNext
-        if(i == 0) {
-          Iterator(Success(Array[Byte]()))
+        if(i == 0) { // (part to send to the preceding partition, offset for first computation)
+          Iterator(Success((Array[Byte](), partition.count)))
         } else {
           val (session, chunks) = partition.get
           val chunk = chunks.next
+          val count = chunk.size + chunks.map(_.size).sum
           val isLast = !chunks.hasNext && i == numPartitions - 1
           Iterator(
             if(!isLast && chunk.size < width-1) {
@@ -89,15 +92,21 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
               Failure(new FastPathImpossible)
             }
             else
-              Success(session.bytesFromChunk(chunk, Math.min(width.toLong-1, chunk.size).toInt, !partition.doCache))
+              Success((
+                session.bytesFromChunk(chunk, Math.min(width.toLong-1, chunk.size).toInt, !partition.doCache),
+                count
+              ))
             )
         }
       }}).collect
       val firstFailure = partitionFringes.find(_.isFailure)
       firstFailure.foreach(_.get) // will rethrow
+      val offsets = partitionFringes.map(_.get._2).scan(0L)(_+_) // prefix sums of counts
+        .map(preCount => (stride - (preCount % stride)).toInt % stride)
       new CLRDD(wrapped.mapPartitionsWithIndex[CLPartition[B]]({ case (i: Int, it: Iterator[CLPartition[T]]) => {
-        val fringe = partitionFringes((i+1)%partitionFringes.size).get
-        val res = Iterator(new CLSlidingPartition[T, B](functionBody, width, fringe, it.next))
+        val fringe = partitionFringes((i+1)%partitionFringes.size).get._1
+        val offset = offsets(i)
+        val res = Iterator(new CLSlidingPartition[T, B](functionBody, width, stride, offset, fringe, it.next))
         it.hasNext
         res
       }}), parentRDD)
@@ -106,7 +115,7 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
         log.warn("sliding window computation stumbled over a chunk where chunk.size < width-1, collecting whole rdd on driver!")
         val count = this.count()
         val newPartitionCount = Math.max(Math.min(numPartitions, count/width), 1).toInt
-        CLRDD.wrap(context.parallelize(this.collect, newPartitionCount)).sliding[B](width, functionBody)
+        CLRDD.wrap(context.parallelize(this.collect, newPartitionCount), (count + width - 1)/width).sliding[B](width, stride, functionBody)
       }
     }
   }
@@ -276,7 +285,7 @@ class CLMapPartition[A, B](val functionBody: String, val parent: CLPartition[A])
   }
 }
 
-class CLSlidingPartition[A, B](val functionBody: String, val width: Int, val fringe: Array[Byte], val parent: CLPartition[A])(implicit clA: CLType[A], clB: CLType[B])
+class CLSlidingPartition[A, B](val functionBody: String, val width: Int, val stride: Int, val offset: Int, val fringe: Array[Byte], val parent: CLPartition[A])(implicit clA: CLType[A], clB: CLType[B])
   extends CLPartition[B]
 {
   @transient private lazy val log = LoggerFactory.getLogger(getClass)
@@ -289,7 +298,7 @@ class CLSlidingPartition[A, B](val functionBody: String, val width: Int, val fri
     val zipped = it.zip(nit ++ Iterator(fringeChunk))
     val mappedChunks = zipped.map({case (c, nc) => {
       try{
-        session.mapSliding(c, nc, f, width)
+        session.mapSliding(c, nc, f, width, stride, offset)
         } finally {
           if(nc eq fringeChunk)
             nc.close

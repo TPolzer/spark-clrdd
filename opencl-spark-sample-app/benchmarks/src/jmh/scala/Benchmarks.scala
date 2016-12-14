@@ -36,7 +36,7 @@ class Benchmarks {
     OpenCL.CPU = cpu
     sc.range(0, size*1024*1024/8, 1, partitions).cache
   }
-  lazy val crdd = CLRDD.wrap(rdd).cacheGPU
+  lazy val crdd = CLRDD.wrap(rdd, Some((size*1024*1024/8+partitions-1)/partitions)).cacheGPU
 
   @Benchmark
   def clsum = {
