@@ -279,6 +279,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }
   }
 
+  var slidingLocal : Array[Long] = null
   def mapSliding[A, B](input: Chunk[A], neighbour: Chunk[A], kernel: WindowReduction[A,B], width: Int, stride: Int, offset: Int)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
     val outputSize = Math.max(0, //outputSize cannot be negative
       //each computation consumes `stride` additional elements, the first one
@@ -289,7 +290,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }
     val ready = new cl_event
     var handle: Option[cl_mem] = None
-    val dimensions = Dimensions(1, Array(0), Array(outputSize), null)
+    val dimensions = Dimensions(1, Array(0), Array(outputSize), slidingLocal)
     try {
       handle = Some(clCreateBuffer(context, 0, outputSize*clB.sizeOf, null, null))
       val kernelArgs = Array(KernelArg(input.handle), KernelArg(neighbour), KernelArg(handle.get),
