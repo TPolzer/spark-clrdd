@@ -283,7 +283,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     val outputSize = Math.max(0, //outputSize cannot be negative
       //each computation consumes `stride` additional elements, the first one
       //consumes width elements (`width - stride` more)
-      (input.size - offset + neighbour.size - (width - stride)) / stride)
+      (input.size - offset + Math.min(neighbour.size, width - 1) - (width - stride)) / stride)
     if(outputSize == 0) {
       return Chunk(0, 0, null, completeEvent())
     }
@@ -291,7 +291,6 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     var handle: Option[cl_mem] = None
     val dimensions = Dimensions(1, Array(0), Array(outputSize), null)
     try {
-      log.warn("allocation {} bytes", outputSize*clB.sizeOf)
       handle = Some(clCreateBuffer(context, 0, outputSize*clB.sizeOf, null, null))
       val kernelArgs = Array(KernelArg(input.handle), KernelArg(neighbour), KernelArg(handle.get),
         KernelArg(input.size), KernelArg(width), KernelArg(stride), KernelArg(offset))
@@ -406,7 +405,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
 
   def bytesFromChunk[T](chunk: Chunk[T], count: Int, destructive: Boolean)(implicit clT: CLType[T]) : Array[Byte] = {
     assert(chunk.size >= count)
-    if(chunk.size == 0) return Array[Byte]()
+    if(chunk.size == 0 || count == 0) return Array[Byte]()
     try {
       val res = new Array[Byte](count * clT.sizeOf)
       clEnqueueReadBuffer(queue, chunk.handle, true, 0, res.size, Pointer.to(res), 1, Array(chunk.ready), null)
