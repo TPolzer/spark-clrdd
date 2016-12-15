@@ -17,4 +17,5 @@ jmh {
   include = ['.*']
   jmhVersion = '1.15'
   duplicateClassesStrategy = 'warn'
+  include = project.hasProperty('regexp') ? project.getProperty('regexp') : '.*'
 }

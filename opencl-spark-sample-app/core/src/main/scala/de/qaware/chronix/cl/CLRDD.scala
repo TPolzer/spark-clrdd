@@ -65,9 +65,9 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
     val clRes = clT.doubleCLInstance
     sliding[clT.doubleCLInstance.elemType](width, 1,
       s"""${clRes.clName} res = ${clRes.zeroName};
-      for(int i=0; i<width; ++i)
+      for(int i=0; i<$width; ++i)
         res += convert_${clRes.clName}(GET(i));
-      return res/width;"""
+      return res/$width;"""
     )(clT.doubleCLInstance.selfInstance, clT.doubleCLInstance.elemClassTag)
   }
 
