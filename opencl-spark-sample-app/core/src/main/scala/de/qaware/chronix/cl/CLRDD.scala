@@ -16,11 +16,10 @@ import scala.concurrent.ExecutionContext.Implicits.global
 
 object CLRDD
 {
-  @transient lazy private val sc = SparkContext.getOrCreate
   def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Long) : CLRDD[T] =
     wrap(wrapped, Some(expectedPartitionSize))
   def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Option[Long] = None) = {
-    val partitions = sc.broadcast(wrapped.partitions)
+    val partitions = wrapped.context.broadcast(wrapped.partitions)
     val elementSize = implicitly[CLType[T]].sizeOf
     var chunkSize = expectedPartitionSize.map(_*elementSize).getOrElse(256*1024*1024L)
     while(chunkSize > Int.MaxValue) {
