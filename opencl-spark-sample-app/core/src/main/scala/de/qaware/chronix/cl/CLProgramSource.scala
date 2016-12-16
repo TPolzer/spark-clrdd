@@ -21,29 +21,35 @@ case class WindowReduction[A, B](
   def genReduceFunction(supply: Iterator[String]) = {
     val r = supply.next()
     val g = supply.next()
-    (Iterator(
-      s"inline $A $g(int i, long idx, const __global $A *primary, long primarySize, const __global $A *secondary, int width, int stride, int offset) {\n",
-      "  long iabs = idx*stride + offset + i;\n",
-      "  if(iabs < primarySize)\n",
-      "    return primary[iabs];\n",
-      "  else\n",
-      "    return secondary[iabs - primarySize];\n",
-      "}\n",
-      s"inline $B $r(long idx, const __global $A *primary, long primarySize, const __global $A *secondary, int width, int stride, int offset) {\n",
-      s"#define GET(i) $g(i, idx, primary, primarySize, secondary, width, stride, offset)\n",
-      "  ", reduceBody, "\n",
-      "#undef GET\n",
-      "}\n"
+    (Iterator(s"""
+inline $A $g(int i, long idx, const __global $A *restrict primary, long primarySize, const __global $A *restrict secondary, int width, int stride, int offset) {
+  long iabs = idx*stride + offset + i;
+  if(iabs < primarySize)
+    return primary[iabs];
+  else
+    return secondary[iabs - primarySize];
+}
+
+inline $B $r(long idx, const __global $A *restrict primary, long primarySize, const __global $A *restrict secondary, int width, int stride, int offset) {
+#define GET(i) $g(i, idx, primary, primarySize, secondary, width, stride, offset)
+  prefetch(primary, width);
+  $reduceBody
+#undef GET
+}
+"""
     ), r)
   }
   def main(r: String) = Iterator(
-    "__kernel\n",
-    s"__attribute__((vec_type_hint($A)))\n",
-    s"void reduce(const __global $A *restrict input, const __global $A *restrict fringe, __global $B *restrict output, long outputSize, long inputSize, int width, int stride, int offset) {\n",
-    "  long i = get_global_id(0);\n",
-    "  if (i < outputSize)\n",
-    s"   output[i] = $r(i, input, inputSize, fringe, width, stride, offset);\n",
-    "}\n"
+    s"""
+__kernel
+__attribute__((vec_type_hint($A)))
+void reduce(const __global $A *restrict input, const __global $A *restrict fringe, __global $B *restrict output, long outputSize, long inputSize, int width, int stride, int offset) {
+  long i = get_group_id(0) * get_local_size(0) + get_local_id(0);
+  long gridSize = get_local_size(0) * get_num_groups(0);
+  for (; i < outputSize; i += gridSize)
+    output[i] = $r(i, input, inputSize, fringe, width, stride, offset);
+}
+"""
   )
   override def generateSource(supply: Iterator[String]) = {
     val (rsrc, rsymb) = genReduceFunction(supply)

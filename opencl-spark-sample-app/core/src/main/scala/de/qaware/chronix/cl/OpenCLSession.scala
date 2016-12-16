@@ -145,10 +145,10 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * parallelization happens outside Chunks for CPU
    * for GPU this could be tuned (possibly depending on operation types)
    * values other than 1 will lead to wrong results on CPU (and wasted time)
-   * nlocal is taken as an upper bound, depending on operand size
+   * reduceLocalSize is taken as an upper bound, depending on operand size
    */
-  var ngroups : Long = if(OpenCL.CPU) 1 else 8*1024
-  var nlocal : Long = if(OpenCL.CPU) 1 else 128
+  var reduceNumGroups : Long = if(OpenCL.CPU) 1 else 8*1024
+  var reduceLocalSize : Long = if(OpenCL.CPU) 1 else 128
 
   /*
    * For some OpenCL implementations, allocating small buffers is quite
@@ -176,13 +176,13 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     val startTime = System.nanoTime
     assert(clB.sizeOf <= dustSize)
     val numWorkGroups = {
-      var tmp = ngroups
+      var tmp = reduceNumGroups
       while(tmp * clB.sizeOf > dustSize) {
         tmp = tmp/2
       }
       tmp
     }
-    val localSize = nlocal // TODO make this tunable / evaluate...?
+    val localSize = reduceLocalSize // TODO make this tunable / evaluate...?
     val globalSize = localSize * numWorkGroups
     val finished = new cl_event
     val ready1 = new cl_event
@@ -286,24 +286,20 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }
   }
 
-  var slidingLocal : Array[Long] = null
+  var slidingLocalSize = if(OpenCL.CPU) 1L else 32L
+  var slidingGlobalSize = if(OpenCL.CPU) 1L else 64*1024L
+
   def mapSliding[A, B](input: Chunk[A], neighbour: Chunk[A], kernel: WindowReduction[A,B], width: Int, stride: Int, offset: Int)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
     val outputSize = Math.max(0, //outputSize cannot be negative
       //each computation consumes `stride` additional elements, the first one
       //consumes width elements (`width - stride` more)
       (input.size - offset + Math.min(neighbour.size, width - 1) - (width - stride)) / stride)
-    /*
-     * For OpenCL <2.0 platforms local work size has to divide global work
-     * size. Restricting the local work size to too small values can harm
-     * performance significantly.
-     */
-    val workSize = (outputSize + 127)/128*128
     if(outputSize == 0) {
       return Chunk(0, 0, null, completeEvent())
     }
     val ready = new cl_event
     var handle: Option[cl_mem] = None
-    val dimensions = Dimensions(1, Array(0), Array(workSize), slidingLocal)
+    val dimensions = Dimensions(1, Array(0), Array(64*1024L), Array(32L))
     try {
       handle = Some(clCreateBuffer(context, 0, outputSize*clB.sizeOf, null, null))
       val kernelArgs = Array(KernelArg(input.handle), KernelArg(neighbour), KernelArg(handle.get), KernelArg(outputSize),

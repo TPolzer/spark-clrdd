@@ -71,35 +71,42 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
   }
 
   def sliding[B: CLType : ClassTag](width: Int, stride: Int, functionBody: String) : CLRDD[B] = {
-    class FastPathImpossible extends Exception
+    case class FastPathImpossible(smallSize: Long) extends Exception
     val numPartitions = wrapped.partitions.size
     try{
       val partitionFringes = wrapped.mapPartitionsWithIndex({case (i: Int, it: Iterator[CLPartition[T]]) => {
         val partition = it.next
         it.hasNext
-        if(i == 0) { // (part to send to the preceding partition, offset for first computation)
+        if(i == 0) { // (part to send to the preceding partition, partition size)
           Iterator(Success((Array[Byte](), partition.count)))
         } else {
           val (session, chunks) = partition.get
           val chunk = chunks.next
-          val count = chunk.size + chunks.map(_.size).sum
-          val isLast = !chunks.hasNext && i == numPartitions - 1
-          Iterator(
-            if(!isLast && chunk.size < width-1) {
+          try { 
+            val count = chunk.size + chunks.map(c => try {
+              c.size
+            } finally {
               if(!partition.doCache)
-                chunk.close
-              Failure(new FastPathImpossible)
-            }
-            else
-              Success((
-                session.bytesFromChunk(chunk, Math.min(width.toLong-1, chunk.size).toInt, !partition.doCache),
-                count
-              ))
-            )
+                c.close
+            }).sum
+            val isLast = !chunks.hasNext && i == numPartitions - 1
+            Iterator(
+              if(!isLast && chunk.size < width-1) {
+                Failure(new FastPathImpossible(chunk.size))
+              }
+              else
+                Success((
+                  session.bytesFromChunk(chunk, Math.min(width.toLong-1, chunk.size).toInt, !partition.doCache),
+                  count
+                ))
+              )
+          } finally {
+            if(!partition.doCache)
+              chunk.close
+          }
         }
       }}).collect
-      val firstFailure = partitionFringes.find(_.isFailure)
-      firstFailure.foreach(_.get) // will rethrow
+      //next line can "rethrow" FastPathImpossible from partitionFringes
       val offsets = partitionFringes.map(_.get._2).scan(0L)(_+_) // prefix sums of counts
         .map(preCount => (stride - (preCount % stride)).toInt % stride)
       new CLRDD(wrapped.mapPartitionsWithIndex[CLPartition[B]]({ case (i: Int, it: Iterator[CLPartition[T]]) => {
@@ -110,11 +117,12 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
         res
       }}), parentRDD)
     } catch {
-      case (_ : FastPathImpossible) => {
-        log.warn("sliding window computation stumbled over a chunk where chunk.size < width-1, collecting whole rdd on driver!")
+      case FastPathImpossible(smallSize) => {
+        log.warn("sliding window computation stumbled over a chunk where chunk.size ({}) < width-1 ({}), collecting whole rdd on driver!", smallSize, width-1)
         val count = this.count()
-        val newPartitionCount = Math.max(Math.min(numPartitions, count/width), 1).toInt
-        CLRDD.wrap(context.parallelize(this.collect, newPartitionCount), (count + width - 1)/width).sliding[B](width, stride, functionBody)
+        val newPartitionCount = Math.max(Math.min(numPartitions, count/width/2), 1).toInt
+        log.warn("chose to use {} instead of {} partitions", newPartitionCount, numPartitions)
+        CLRDD.wrap(context.parallelize(this.collect, newPartitionCount), (count + newPartitionCount - 1)/newPartitionCount).sliding[B](width, stride, functionBody)
       }
     }
   }

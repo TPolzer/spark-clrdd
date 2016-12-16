@@ -7,8 +7,9 @@ import org.slf4j.LoggerFactory
 
 object OpenCL
 {
+  private lazy val log = LoggerFactory.getLogger(getClass)
   setExceptionsEnabled(true)
-  var CPU = false
+  @volatile var CPU = false
   lazy val deviceType = if(CPU) CL_DEVICE_TYPE_CPU else CL_DEVICE_TYPE_GPU
   lazy val devices = { // holds one session for each device
     val numPlatforms = Array(0)
@@ -28,7 +29,7 @@ object OpenCL
             val maxComputeUnits = Array(0)
             clGetDeviceInfo(device, CL_DEVICE_MAX_COMPUTE_UNITS, 4, Pointer.to(maxComputeUnits), null)
             var partitionSize = maxComputeUnits(0)
-            for(i <- ((maxComputeUnits(0)+15)/16 to maxComputeUnits(0)-1).reverse) {
+            for(i <- ((maxComputeUnits(0)+31)/32 to maxComputeUnits(0)-1).reverse) { // create at most 32 subdevices
               if(maxComputeUnits(0) % i == 0)
                 partitionSize = i
             }
@@ -46,12 +47,18 @@ object OpenCL
               val queue = clCreateCommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, null) //deprecated for OpenCL 2.0, needed for 1.2!
               Some(new OpenCLSession(context, queue, device))
             } catch {
-              case e: CLException => None
+              case e: CLException => {
+                log.warn("got {} while looking for devices", e)
+                None
+              }
             }
           })
         })
       } catch {
-        case e: CLException => Nil
+        case e: CLException => {
+          log.warn("got {} while looking for devices", e)
+          Nil
+        }
       }
     })
   }
