@@ -18,6 +18,13 @@ object CLRDD
 {
   def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Long) : CLRDD[T] =
     wrap(wrapped, Some(expectedPartitionSize))
+  /**
+   * Wraps an ordinary RDD to be put on the GPU for OpenCL computations. Call
+   * `cacheGPU` on it to make it persistent on the GPU, otherwise it is
+   * streamed as needed. Do not wrap RDDs with huge partitions directly (e.g.
+   * ParallelCollectionRDD of large collections other than ranges),
+   * wrapped.partitions will be broadcast!
+   */
   def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Option[Long] = None) = {
     val partitions = wrapped.context.broadcast(wrapped.partitions)
     val elementSize = implicitly[CLType[T]].sizeOf
@@ -166,7 +173,7 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
   /*
    * Cache state is currently not preserved across failures.
    * This enables computations which need more memory than available to
-   * succeed. On the other hand it goes against the user.
+   * succeed. On the other hand it goes against the intent of the user.
    */
   def cacheGPU = {
     wrapped.cache
