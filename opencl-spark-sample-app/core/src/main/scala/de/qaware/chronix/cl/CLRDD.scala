@@ -21,19 +21,24 @@ object CLRDD
   /**
    * Wraps an ordinary RDD to be put on the GPU for OpenCL computations. Call
    * `cacheGPU` on it to make it persistent on the GPU, otherwise it is
-   * streamed as needed. Do not wrap RDDs with huge partitions directly (e.g.
-   * ParallelCollectionRDD of large collections other than ranges),
-   * wrapped.partitions will be broadcast!
+   * streamed as needed.
+   * Be cautious with RDDs that have large partition objects. These are sent to
+   * the executors again every time computations happen, even if the results
+   * are already cached!
+   *
+   * The same problem occurs in plain Spark, citing from ParallelCollectionRDD.scala:
+   * // TODO: Right now, each split sends along its full data, even if later down the RDD chain it gets
+   * // cached. It might be worthwhile to write the data to a file in the DFS and read it in the split
+   * // instead.
+   * // UPDATE: A parallel collection can be checkpointed to HDFS, which achieves this goal.
    */
   def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Option[Long] = None) = {
-    val partitions = wrapped.context.broadcast(wrapped.partitions)
     val elementSize = implicitly[CLType[T]].sizeOf
     var chunkSize = expectedPartitionSize.map(_*elementSize).getOrElse(256*1024*1024L)
     while(chunkSize > Int.MaxValue) {
       chunkSize = (chunkSize + 1)/2
     }
-    val partitionsRDD = wrapped.mapPartitionsWithIndex( { case (idx: Int, _) =>
-        Iterator(new CLWrapPartition[T](partitions.value(idx), wrapped, chunkSize.toInt, OpenCL.get()).asInstanceOf[CLPartition[T]]) } )
+    val partitionsRDD = new CLWrapPartitionRDD(wrapped, chunkSize.toInt)
     new CLRDD[T](partitionsRDD, wrapped)
   }
 }
@@ -186,6 +191,17 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
     wrapped.unpersist(true)
     this
   }
+}
+
+class CLWrapPartitionRDD[T : CLType](val parentRDD: RDD[T], val chunkSize: Int)
+  extends RDD[CLPartition[T]](parentRDD)
+{
+   override def compute(split: Partition, context: TaskContext) = {
+     Iterator(new CLWrapPartition[T](split, parentRDD, chunkSize, OpenCL.get()))
+   }
+   override def getPartitions : Array[Partition] = {
+     parentRDD.partitions
+   }
 }
 
 class CLWrapPartition[T : CLType] (val parentPartition: Partition, val parentRDD: RDD[T], val chunkSize: Int, val initialSession: OpenCLSession)
