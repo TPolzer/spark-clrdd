@@ -28,8 +28,8 @@ object BenchmarksCommon {
 }
 
 @State(Scope.Benchmark)
-@Warmup(iterations = 13, time = 1, timeUnit = TimeUnit.SECONDS)
-@Measurement(iterations = 8, time = 1, timeUnit = TimeUnit.SECONDS)
+@Warmup(iterations = 2, time = 10, timeUnit = TimeUnit.SECONDS)
+@Measurement(iterations = 4, time = 2, timeUnit = TimeUnit.SECONDS)
 @Timeout(time = 1, timeUnit = TimeUnit.MINUTES)
 @Fork(value = 1, jvmArgsAppend = Array("-Xmx10g"))
 abstract class BenchmarksCommon {
