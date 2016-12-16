@@ -4,7 +4,8 @@ plugins {
 
 dependencies {
   compile project(':core')
-  compile group:'org.apache.spark', name: 'spark-core_2.11', version: '2.0.0'
+  jmh group:'org.apache.spark', name: 'spark-core_2.11', version: '2.0.0'
+  jmh group:'org.apache.spark', name: 'spark-mllib_2.11', version: '2.0.0'
 }
 
 sourceSets {
@@ -17,5 +18,7 @@ jmh {
   include = ['.*']
   jmhVersion = '1.15'
   duplicateClassesStrategy = 'warn'
+  jvmArgsPrepend = '-Dspark.master=local[*] -Dspark.app.name=gradleBenchmarking'
   include = project.hasProperty('regexp') ? project.getProperty('regexp') : '.*'
+  zip64 = true
 }

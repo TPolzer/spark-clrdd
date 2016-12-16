@@ -31,6 +31,11 @@ object CLRDD
    * // cached. It might be worthwhile to write the data to a file in the DFS and read it in the split
    * // instead.
    * // UPDATE: A parallel collection can be checkpointed to HDFS, which achieves this goal.
+   *
+   * If you do not care about resilience, you can just use local checkpointing:
+   * val rdd = sc.parallelize(collection).localCheckpoint
+   * rdd.foreach(_ => {}); // force rdd, will be cached after here in spark
+   * val crdd = CLRDD.wrap(rdd)
    */
   def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Option[Long] = None) = {
     val elementSize = implicitly[CLType[T]].sizeOf
@@ -204,12 +209,16 @@ class CLWrapPartitionRDD[T : CLType](val parentRDD: RDD[T], val chunkSize: Int)
    }
 }
 
-class CLWrapPartition[T : CLType] (val parentPartition: Partition, val parentRDD: RDD[T], val chunkSize: Int, val initialSession: OpenCLSession)
-  extends CLPartition[T]
+class CLWrapPartition[T : CLType] (val parentPartition: Partition, val parentRDD: RDD[T], val chunkSize: Int, @transient val initialSession: OpenCLSession)
+  extends CLPartition[T] with Serializable
 {
   override def src : (OpenCLSession, Iterator[OpenCL.Chunk[T]]) = {
+    val session = if(initialSession == null)
+      OpenCL.get()
+    else
+      initialSession
     val ctx = TaskContext.get
-    (initialSession, initialSession.stream(parentRDD.iterator(parentPartition, ctx), chunkSize))
+    (session, session.stream(parentRDD.iterator(parentPartition, ctx), chunkSize))
   }
 }
 
