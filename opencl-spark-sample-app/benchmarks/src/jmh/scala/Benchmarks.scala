@@ -36,11 +36,11 @@ class BenchmarksLarge extends BenchmarksCommon {
   private val log = LoggerFactory.getLogger(getClass)
 
   override lazy val rdd = {
-    sc.range(0, 1000, 1, 1000).foreach(_ => OpenCL.CPU = true)
+    sc.range(0, 1000, 1, 1000).foreach(_ => OpenCL.CPU = cpu)
     sc.range(0, size*1024*1024/8, 1, partitions).cache
   }
   override lazy val crdd = {
-    sc.range(0, 1000, 1, 1000).foreach(_ => OpenCL.CPU = true)
+    sc.range(0, 1000, 1, 1000).foreach(_ => OpenCL.CPU = cpu)
     var chunks = partitions
     log.warn("rdd has {} partitions", chunks)
     var crdd : CLRDD[Long] = null
@@ -98,13 +98,22 @@ class BenchmarksLarge extends BenchmarksCommon {
   def clChkAvg1024 = super.clChkAvg(1024)
 
   @Benchmark
-  def chkAvg16 = super.chkAvg(16)
+  def chkAvg16 = {
+    assert(cpu)
+    super.chkAvg(16)
+  }
   
   @Benchmark
-  def chkAvg128 = super.chkAvg(128)
+  def chkAvg128 = {
+    assert(cpu)
+    super.chkAvg(128)
+  }
   
   @Benchmark
-  def chkAvg1024 = super.chkAvg(1024)
+  def chkAvg1024 = {
+    assert(cpu)
+    super.chkAvg(1024)
+  }
 }
 
 object BenchmarksSmall {
@@ -133,11 +142,11 @@ class BenchmarksSmall extends BenchmarksCommon {
   private val log = LoggerFactory.getLogger(getClass)
 
   override lazy val rdd = {
-    OpenCL.CPU = cpu
+    sc.range(0, 1000, 1, 1000).foreach(_ => OpenCL.CPU = cpu)
     sc.range(0, size*1024*1024/8, 1, partitions).cache
   }
   override lazy val crdd = {
-    OpenCL.CPU = cpu
+    sc.range(0, 1000, 1, 1000).foreach(_ => OpenCL.CPU = cpu)
     CLRDD.wrap(rdd, Some((size*1024*1024/8+partitions-1)/partitions)).cacheGPU
   }
 
@@ -166,16 +175,28 @@ class BenchmarksSmall extends BenchmarksCommon {
   def clMovAvg4 = super.clMovAvg(4)
   
   @Benchmark
-  def MovAvg128 = super.movAvg(128)
+  def MovAvg128 = {
+    assert(cpu)
+    super.movAvg(128)
+  }
 
   @Benchmark
-  def MovAvg32 = super.movAvg(32)
+  def MovAvg32 = {
+    assert(cpu)
+    super.movAvg(32)
+  }
   
   @Benchmark
-  def MovAvg16 = super.movAvg(16)
+  def MovAvg16 = {
+    assert(cpu)
+    super.movAvg(16)
+  }
   
   @Benchmark
-  def MovAvg4 = super.movAvg(4)
+  def MovAvg4 = {
+    assert(cpu)
+    super.movAvg(4)
+  }
 
   @Benchmark
   def clChkAvg16 = super.clChkAvg(16)
@@ -187,11 +208,20 @@ class BenchmarksSmall extends BenchmarksCommon {
   def clChkAvg1024 = super.clChkAvg(1024)
   
   @Benchmark
-  def chkAvg16 = super.chkAvg(16)
+  def chkAvg16 = {
+    assert(cpu)
+    super.chkAvg(16)
+  }
   
   @Benchmark
-  def chkAvg128 = super.chkAvg(128)
+  def chkAvg128 = {
+    assert(cpu)
+    super.chkAvg(128)
+  }
   
   @Benchmark
-  def chkAvg1024 = super.chkAvg(1024)
+  def chkAvg1024 = {
+    assert(cpu)
+    super.chkAvg(1024)
+  }
 }
