@@ -8,6 +8,8 @@ import org.openjdk.jmh.annotations._
 import org.slf4j.LoggerFactory
 import java.util.concurrent.TimeUnit
 import org.apache.spark.mllib.rdd.RDDFunctions._
+import scala.concurrent.duration._
+import scala.concurrent.Await
 
 object BenchmarksCommon {
   def arraySum(a: Array[Long]) = {
@@ -46,8 +48,18 @@ abstract class BenchmarksCommon {
 
   def rdd: RDD[Long]
   def crdd: CLRDD[Long]
+  var cpu: Boolean
   def totalSize: Long
   var size: Long
+  
+  lazy val session = OpenCL.get(cpu)
+  lazy val chunk = {
+    assert(size*1024*1024 <= Int.MaxValue)
+    val it = session.stream((0L to size*1024*1024/8-1).iterator, (size*1024*1024).toInt)
+    val res = it.next
+    assert(!it.hasNext)
+    res
+  }
 
   def sizeLoop[A](f: => A) {
     var i = 0L;
@@ -69,7 +81,25 @@ abstract class BenchmarksCommon {
     res 
   }
 
-  def clstats = { 
+  def rawclsum = {
+    var res = 0.0
+    val clL = implicitly[CLType[Long]]
+    val clD = implicitly[CLType[Double]]
+    val kernel = MapReduceKernel(
+      MapFunction("return x;", clL, clD),
+      "return x+y;",
+      "0.0",
+      cpu,
+      clL, clD
+    ) 
+    sizeLoop {
+      val f = session.reduceChunk(chunk, kernel)
+      res += Await.result(f, Duration.Inf)
+    }
+    res
+  }
+
+  def clstats = {
     var res = crdd.stats
     var i = size;
     while(i != totalSize) {

@@ -28,7 +28,7 @@ class BenchmarksLarge extends BenchmarksCommon {
       2
   }
   @Param(Array("true", "false"))
-  var cpu = true
+  override var cpu = true
 
   override val totalSize = BenchmarksLarge.size.toLong
 
@@ -69,6 +69,9 @@ class BenchmarksLarge extends BenchmarksCommon {
 
   @Benchmark
   override def clsum = super.clsum
+
+  @Benchmark
+  override def rawclsum = super.rawclsum
 
   @Benchmark
   override def clstats = super.clstats
@@ -134,7 +137,7 @@ class BenchmarksSmall extends BenchmarksCommon {
       2
   }
   @Param(Array("true", "false"))
-  var cpu = true
+  override var cpu = true
 
   override val totalSize = BenchmarksSmall.size.toLong
 
@@ -152,6 +155,9 @@ class BenchmarksSmall extends BenchmarksCommon {
 
   @Benchmark
   override def clsum = super.clsum
+
+  @Benchmark
+  override def rawclsum = super.rawclsum
 
   @Benchmark
   override def clstats = super.clstats
