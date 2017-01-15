@@ -68,17 +68,17 @@ object OpenCL
   def safeReleaseEvent(e: cl_event) = if(e != null && e != new cl_event) clReleaseEvent(e)
 
   val deviceIndex = Array(new AtomicInteger(0), new AtomicInteger(0))
-  val updateIndex = new java.util.function.IntUnaryOperator() {
-    override def applyAsInt(i: Int) = {
-      (i + 1) % devices.size
-    }
-  }
 
   /*
    * supplies OpenCLSessions round robin over devices
    */
   def get(cpu : Boolean) = {
     val cpuIndex = if(cpu) 1 else 0
+    val updateIndex = new java.util.function.IntUnaryOperator() {
+      override def applyAsInt(i: Int) = {
+        (i + 1) % devices(cpuIndex).size
+      }
+    }
     val idx = deviceIndex(cpuIndex).getAndUpdate(updateIndex)
     devices(cpuIndex)(idx)
   }
