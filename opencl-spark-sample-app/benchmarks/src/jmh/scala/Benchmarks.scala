@@ -36,13 +36,11 @@ class BenchmarksLarge extends BenchmarksCommon {
   private val log = LoggerFactory.getLogger(getClass)
 
   override lazy val rdd = {
-    val useCPU = cpu //get rid of `this` for spark
-    sc.range(0, 1000, 1, 1000).foreach(_ => OpenCL.CPU = useCPU)
+    OpenCL.CPU = cpu
     sc.range(0, size*1024*1024/8, 1, partitions).cache
   }
   override lazy val crdd = {
-    val useCPU = cpu //get rid of `this` for spark
-    sc.range(0, 1000, 1, 1000).foreach(_ => OpenCL.CPU = useCPU)
+    OpenCL.CPU = cpu
     var chunks = partitions
     log.warn("rdd has {} partitions", chunks)
     var crdd : CLRDD[Long] = null
@@ -144,13 +142,11 @@ class BenchmarksSmall extends BenchmarksCommon {
   private val log = LoggerFactory.getLogger(getClass)
 
   override lazy val rdd = {
-    val useCPU = cpu //get rid of `this` for spark
-    sc.range(0, 1000, 1, 1000).foreach(_ => OpenCL.CPU = useCPU)
+    OpenCL.CPU = cpu
     sc.range(0, size*1024*1024/8, 1, partitions).cache
   }
   override lazy val crdd = {
-    val useCPU = cpu //get rid of `this` for spark
-    sc.range(0, 1000, 1, 1000).foreach(_ => OpenCL.CPU = useCPU)
+    OpenCL.CPU = cpu
     CLRDD.wrap(rdd, Some((size*1024*1024/8+partitions-1)/partitions)).cacheGPU
   }
 

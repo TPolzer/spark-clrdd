@@ -3,15 +3,17 @@ package de.qaware.chronix.cl
 import org.jocl._
 import org.jocl.CL._
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.slf4j.LoggerFactory
 
 object OpenCL
 {
   private lazy val log = LoggerFactory.getLogger(getClass)
   setExceptionsEnabled(true)
-  @volatile var CPU = false
-  lazy val deviceType = if(CPU) CL_DEVICE_TYPE_CPU else CL_DEVICE_TYPE_GPU
-  lazy val devices = { // holds one session for each device
+  var CPU = false
+  lazy val devices = for(cpu <- Array(false, true)) yield { // holds one session for each device
+    val deviceType = if(cpu) CL_DEVICE_TYPE_CPU else CL_DEVICE_TYPE_GPU
     val numPlatforms = Array(0)
     clGetPlatformIDs(0, null, numPlatforms)
     val platforms = new Array[cl_platform_id](numPlatforms(0))
@@ -45,10 +47,10 @@ object OpenCL
             try{
               val context = clCreateContext(contextProperties, 1, Array(device), null, null, null)
               val queue = clCreateCommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, null) //deprecated for OpenCL 2.0, needed for 1.2!
-              Some(new OpenCLSession(context, queue, device))
+              Some(new OpenCLSession(context, queue, device, cpu))
             } catch {
               case e: CLException => {
-                log.warn("got {} while looking for devices", e)
+                log.trace("got {} while looking for devices", e)
                 None
               }
             }
@@ -56,7 +58,7 @@ object OpenCL
         })
       } catch {
         case e: CLException => {
-          log.warn("got {} while looking for devices", e)
+          log.trace("got {} while looking for devices", e)
           Nil
         }
       }
@@ -65,7 +67,7 @@ object OpenCL
 
   def safeReleaseEvent(e: cl_event) = if(e != null && e != new cl_event) clReleaseEvent(e)
 
-  val deviceIndex = new java.util.concurrent.atomic.AtomicInteger(0)
+  val deviceIndex = Array(new AtomicInteger(0), new AtomicInteger(0))
   val updateIndex = new java.util.function.IntUnaryOperator() {
     override def applyAsInt(i: Int) = {
       (i + 1) % devices.size
@@ -75,9 +77,10 @@ object OpenCL
   /*
    * supplies OpenCLSessions round robin over devices
    */
-  def get() = {
-    val idx = deviceIndex.getAndUpdate(updateIndex)
-    devices(idx)
+  def get(cpu : Boolean) = {
+    val cpuIndex = if(cpu) 1 else 0
+    val idx = deviceIndex(cpuIndex).getAndUpdate(updateIndex)
+    devices(cpuIndex)(idx)
   }
 
   /**

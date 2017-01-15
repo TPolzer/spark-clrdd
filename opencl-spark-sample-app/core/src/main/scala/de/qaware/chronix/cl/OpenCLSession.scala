@@ -20,7 +20,7 @@ import java.lang.ref.{ReferenceQueue, WeakReference}
 import java.util.concurrent.atomic.AtomicLong
 import java.nio.ByteBuffer
 
-class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val device: cl_device_id)
+class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val device: cl_device_id, val cpu: Boolean)
 {
   import OpenCL.{Program, Chunk, KernelArg, Dimensions, safeReleaseEvent}
   val log = LoggerFactory.getLogger(getClass)
@@ -147,8 +147,10 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
    * values other than 1 will lead to wrong results on CPU (and wasted time)
    * reduceLocalSize is taken as an upper bound, depending on operand size
    */
-  var reduceNumGroups : Long = if(OpenCL.CPU) 1 else 8*1024
-  var reduceLocalSize : Long = if(OpenCL.CPU) 1 else 128
+  var reduceNumGroupsGPU : Long = 8*1024
+  var reduceNumGroupsCPU : Long = 1
+  var reduceLocalSizeGPU : Long = 128
+  var reduceLocalSizeCPU : Long = 1
 
   /*
    * For some OpenCL implementations, allocating small buffers is quite
@@ -173,16 +175,19 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   }
 
   def reduceChunk[A, B](input: Chunk[A], kernel: MapReduceKernel[A,B])(implicit clA: CLType[A], clB: CLType[B]): Future[B] = {
+    val (numGroups, localSize) = if(cpu)
+      (reduceNumGroupsCPU, reduceLocalSizeCPU)
+    else
+      (reduceNumGroupsGPU, reduceLocalSizeGPU)
     val startTime = System.nanoTime
     assert(clB.sizeOf <= dustSize)
-    val numWorkGroups = {
-      var tmp = reduceNumGroups
+    val numWorkGroups = { //reduce numGroups to fit intermediate result into one dust piece
+      var tmp = numGroups
       while(tmp * clB.sizeOf > dustSize) {
         tmp = tmp/2
       }
       tmp
     }
-    val localSize = reduceLocalSize // TODO make this tunable / evaluate...?
     val globalSize = localSize * numWorkGroups
     val finished = new cl_event
     val ready1 = new cl_event
@@ -286,8 +291,10 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }
   }
 
-  var slidingLocalSize = if(OpenCL.CPU) 1L else 32L
-  var slidingGlobalSize = if(OpenCL.CPU) 1L else 64*1024L
+  var slidingLocalSizeGPU = 32L
+  var slidingLocalSizeCPU = 1L
+  var slidingGlobalSizeGPU = 64*1024L
+  var slidingGlobalSizeCPU = 1L
 
   def mapSliding[A, B](input: Chunk[A], neighbour: Chunk[A], kernel: WindowReduction[A,B], width: Int, stride: Int, offset: Int)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
     val outputSize = Math.max(0, //outputSize cannot be negative
@@ -299,7 +306,10 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
     }
     val ready = new cl_event
     var handle: Option[cl_mem] = None
-    val dimensions = Dimensions(1, Array(0), Array(64*1024L), Array(32L))
+    val dimensions = if(cpu)
+      Dimensions(1, Array(0), Array(slidingGlobalSizeCPU), Array(slidingLocalSizeCPU))
+    else
+      Dimensions(1, Array(0), Array(slidingGlobalSizeGPU), Array(slidingLocalSizeGPU))
     try {
       handle = Some(clCreateBuffer(context, 0, outputSize*clB.sizeOf, null, null))
       val kernelArgs = Array(KernelArg(input.handle), KernelArg(neighbour), KernelArg(handle.get), KernelArg(outputSize),

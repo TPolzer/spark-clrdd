@@ -16,8 +16,10 @@ import scala.concurrent.ExecutionContext.Implicits.global
 
 object CLRDD
 {
-  def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Long) : CLRDD[T] =
-    wrap(wrapped, Some(expectedPartitionSize))
+  @transient private lazy val log = LoggerFactory.getLogger(getClass)
+
+  def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Long, cpu: Boolean) : CLRDD[T] =
+    wrap(wrapped, Some(expectedPartitionSize), cpu)
   /**
    * Wraps an ordinary RDD to be put on the GPU for OpenCL computations. Call
    * `cacheGPU` on it to make it persistent on the GPU, otherwise it is
@@ -37,21 +39,25 @@ object CLRDD
    * rdd.foreach(_ => {}); // force rdd, will be cached after here in spark
    * val crdd = CLRDD.wrap(rdd)
    */
-  def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Option[Long] = None) = {
+  def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Option[Long] = None, cpu: Boolean = OpenCL.CPU) = {
     val elementSize = implicitly[CLType[T]].sizeOf
     var chunkSize = expectedPartitionSize.map(_*elementSize).getOrElse(256*1024*1024L)
     while(chunkSize > Int.MaxValue) {
       chunkSize = (chunkSize + 1)/2
     }
-    val partitionsRDD = new CLWrapPartitionRDD(wrapped, chunkSize.toInt)
-    new CLRDD[T](partitionsRDD, wrapped)
+    if(cpu)
+      log.info("wrapping for cpu use")
+    else
+      log.info("wrapping for gpu use")
+    val partitionsRDD = new CLWrapPartitionRDD(wrapped, chunkSize.toInt, cpu)
+    new CLRDD[T](partitionsRDD, wrapped, cpu)
   }
 }
 
 /*
  * wrapped has to contain exactly ONE CLPartition value per RDD partition
  */
-class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentRDD: RDD[_])
+class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentRDD: RDD[_], val cpu: Boolean)
   extends RDD[T](wrapped)
 {
   override def compute(split: Partition, ctx: TaskContext) : Iterator[T] = {
@@ -70,11 +76,11 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
   }
 
   def to[B : CLType : ClassTag] : CLRDD[B] = {
-    new CLRDD(wrapped.map(_.map[B]("return x;")), parentRDD)
+    new CLRDD(wrapped.map(_.map[B]("return x;")), parentRDD, cpu)
   }
 
   def map[B : CLType : ClassTag](functionBody: String) : CLRDD[B] = {
-    new CLRDD(wrapped.map(_.map[B](functionBody)), parentRDD)
+    new CLRDD(wrapped.map(_.map[B](functionBody)), parentRDD, cpu)
   }
 
   def movingAverage(width: Int)(implicit clT: CLType[T]) : CLRDD[clT.doubleCLInstance.elemType] = {
@@ -132,14 +138,14 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
         val res = Iterator(new CLSlidingPartition[T, B](functionBody, width, stride, offset, fringe, it.next))
         it.hasNext
         res
-      }}), parentRDD)
+      }}), parentRDD, cpu)
     } catch {
       case FastPathImpossible(smallSize) => {
         log.warn("sliding window computation stumbled over a chunk where chunk.size ({}) < width-1 ({}), collecting whole rdd on driver!", smallSize, width-1)
         val count = this.count()
         val newPartitionCount = Math.max(Math.min(numPartitions, count/width/2), 1).toInt
         log.warn("chose to use {} instead of {} partitions", newPartitionCount, numPartitions)
-        CLRDD.wrap(context.parallelize(this.collect, newPartitionCount), (count + newPartitionCount - 1)/newPartitionCount).sliding[B](width, stride, functionBody)
+        CLRDD.wrap(context.parallelize(this.collect, newPartitionCount), (count + newPartitionCount - 1)/newPartitionCount, cpu).sliding[B](width, stride, functionBody)
       }
     }
   }
@@ -162,7 +168,7 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
           clT, clS),
         Stats.clMerge,
         Stats.clZero,
-        OpenCL.CPU,
+        cpu,
         clT, clS),
       Stats(),
       (x: Stats, y: Stats) => x.merge(y)
@@ -175,7 +181,7 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
       MapKernel.identity[T],
       "return x+y;",
       clT.zeroName,
-      OpenCL.CPU,
+      cpu,
       clT, clT
     ), num.zero, ((x: T, y: T) => num.plus(x,y)))
   }
@@ -198,23 +204,23 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
   }
 }
 
-class CLWrapPartitionRDD[T : CLType](val parentRDD: RDD[T], val chunkSize: Int)
+class CLWrapPartitionRDD[T : CLType](val parentRDD: RDD[T], val chunkSize: Int, val cpu: Boolean)
   extends RDD[CLPartition[T]](parentRDD)
 {
    override def compute(split: Partition, context: TaskContext) = {
-     Iterator(new CLWrapPartition[T](split, parentRDD, chunkSize, OpenCL.get()))
+     Iterator(new CLWrapPartition[T](split, parentRDD, chunkSize, OpenCL.get(cpu), cpu))
    }
    override def getPartitions : Array[Partition] = {
      parentRDD.partitions
    }
 }
 
-class CLWrapPartition[T : CLType] (val parentPartition: Partition, val parentRDD: RDD[T], val chunkSize: Int, @transient val initialSession: OpenCLSession)
+class CLWrapPartition[T : CLType] (val parentPartition: Partition, val parentRDD: RDD[T], val chunkSize: Int, @transient val initialSession: OpenCLSession, val cpu: Boolean)
   extends CLPartition[T] with Serializable
 {
   override def src : (OpenCLSession, Iterator[OpenCL.Chunk[T]]) = {
     val session = if(initialSession == null)
-      OpenCL.get()
+      OpenCL.get(cpu)
     else
       initialSession
     val ctx = TaskContext.get
