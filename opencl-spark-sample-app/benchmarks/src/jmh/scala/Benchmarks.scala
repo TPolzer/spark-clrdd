@@ -19,7 +19,7 @@ class BenchmarksLarge extends BenchmarksCommon {
   @Param(Array("64", "128", "512", "1024"))
 //  @Param(Array("4096", "16384", "32768", "65536"))
   override var size : Long = 0
-  lazy val partitions : Int = {
+  override def partitions : Int = {
     if(cpu)
 //      16*5
       8
@@ -128,7 +128,7 @@ class BenchmarksSmall extends BenchmarksCommon {
 
   @Param(Array("1", "2", "4", "16", "32"))
   override var size : Long = 0
-  lazy val partitions : Int = {
+  override def partitions : Int = {
     if(cpu)
 //      16*5
       8

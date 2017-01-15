@@ -51,14 +51,18 @@ abstract class BenchmarksCommon {
   var cpu: Boolean
   def totalSize: Long
   var size: Long
+  def partitions: Int
   
-  lazy val session = OpenCL.get(cpu)
-  lazy val chunk = {
-    assert(size*1024*1024 <= Int.MaxValue)
-    val it = session.stream((0L to size*1024*1024/8-1).iterator, (size*1024*1024).toInt)
-    val res = it.next
-    assert(!it.hasNext)
-    res
+  lazy val chunks = {
+    val chunkSize = size*1024*1024/partitions
+    assert(chunkSize <= Int.MaxValue)
+    for(i <- 1 to partitions) yield {
+      val session = OpenCL.get(cpu)
+      val it = session.stream((1L to chunkSize/8).iterator, chunkSize.toInt)
+      val res = it.next
+      assert(!it.hasNext)
+      (session, res)
+    }
   }
 
   def sizeLoop[A](f: => A) {
@@ -93,8 +97,11 @@ abstract class BenchmarksCommon {
       clL, clD
     ) 
     sizeLoop {
-      val f = session.reduceChunk(chunk, kernel)
-      res += Await.result(f, Duration.Inf)
+      val fs = chunks.par.map({case (session: OpenCLSession, chunk:OpenCL.Chunk[Long]) => {
+        val f = session.reduceChunk(chunk, kernel)
+        Await.result(f, Duration.Inf)
+      }})
+      res += fs.sum
     }
     res
   }
