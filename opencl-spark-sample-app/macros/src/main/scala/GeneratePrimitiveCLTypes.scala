@@ -5,6 +5,14 @@ import scala.language.experimental.macros
 import scala.annotation.StaticAnnotation
 import scala.annotation.compileTimeOnly
 
+/** Generate instances of CLType[T] at compile time
+ *
+ * This macro generates instances for all primitive types and their
+ * corresponding tuple(scala)/vector(opencl) types automatically. It is keyed
+ * to only match on an empty "object ImplicitCLTypes", which will be replaced
+ * by implicit instances of CLType[T]. Needs Macro Paradise:
+ * http://docs.scala-lang.org/overviews/macros/paradise.html
+ */
 @compileTimeOnly("enable macro paradise to expand macro annotations")
 class GeneratePrimitiveCLTypes extends StaticAnnotation {
   def macroTransform(annottees: Any*): Any = macro CLTypeGenerator.generate

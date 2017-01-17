@@ -18,26 +18,33 @@ object CLRDD
 {
   @transient private lazy val log = LoggerFactory.getLogger(getClass)
 
+  /** Wrap a Spark for OpenCL computations */
   def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Long, cpu: Boolean) : CLRDD[T] =
     wrap(wrapped, Some(expectedPartitionSize), cpu)
-  /**
-   * Wraps an ordinary RDD to be put on the GPU for OpenCL computations. Call
-   * `cacheGPU` on it to make it persistent on the GPU, otherwise it is
-   * streamed as needed.
-   * Be cautious with RDDs that have large partition objects. These are sent to
-   * the executors again every time computations happen, even if the results
-   * are already cached!
+  /** Wrap a Spark for OpenCL computations
    *
-   * The same problem occurs in plain Spark, citing from ParallelCollectionRDD.scala:
-   * // TODO: Right now, each split sends along its full data, even if later down the RDD chain it gets
-   * // cached. It might be worthwhile to write the data to a file in the DFS and read it in the split
-   * // instead.
-   * // UPDATE: A parallel collection can be checkpointed to HDFS, which achieves this goal.
+   *  The unit of expectedPartitionSize should be bytes. Continuous chunks of
+   *  that size will be allocated for each partition (leading to failure if the
+   *  size is too large, wasted space if it is nearly of partition size and
+   *  ineffiency if it is too small).
    *
-   * If you do not care about resilience, you can just use local checkpointing:
-   * val rdd = sc.parallelize(collection).localCheckpoint
-   * rdd.foreach(_ => {}); // force rdd, will be cached after here in spark
-   * val crdd = CLRDD.wrap(rdd)
+   *  Wraps an ordinary RDD to be put on the GPU for OpenCL computations. Call
+   *  `cacheGPU` on it to make it persistent on the GPU, otherwise it is
+   *  streamed as needed. Be cautious with RDDs that have large partition
+   *  objects. These are sent to the executors again every time computations
+   *  happen, even if the results are already cached!
+   *
+   *  The same problem occurs in plain Spark, citing from
+   *  ParallelCollectionRDD.scala:
+   *  // TODO: Right now, each split sends along its full data, even if later down the RDD chain it gets
+   *  // cached. It might be worthwhile to write the data to a file in the DFS and read it in the split
+   *  // instead.
+   *  // UPDATE: A parallel collection can be checkpointed to HDFS, which achieves this goal.
+   *
+   *  If you do not care about resilience, you can just use local checkpointing:
+   *  val rdd = sc.parallelize(collection).localCheckpoint
+   *  rdd.foreach(_ => {}); // force rdd, will be cached after here in spark, needed!
+   *  val crdd = CLRDD.wrap(rdd)
    */
   def wrap[T : ClassTag : CLType](wrapped: RDD[T], expectedPartitionSize: Option[Long] = None, cpu: Boolean = OpenCL.CPU) = {
     val elementSize = implicitly[CLType[T]].sizeOf
@@ -54,8 +61,9 @@ object CLRDD
   }
 }
 
-/*
- * wrapped has to contain exactly ONE CLPartition value per RDD partition
+/** An RDD that handles binary data on an OpenCL device.
+ *
+ *  Methods assume exactly one value per partition inside wrapped!
  */
 class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentRDD: RDD[_], val cpu: Boolean)
   extends RDD[T](wrapped)
@@ -76,13 +84,24 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
   }
 
   def to[B : CLType : ClassTag] : CLRDD[B] = {
-    new CLRDD(wrapped.map(_.map[B]("return x;")), parentRDD, cpu)
+    map[B]("return x;")
   }
 
+  /** Apply a simple transformation to this RDD
+   *
+   *  @param functionBody will be put inside an OpenCL function of the kind
+   *    inline B __some_generated_function_name(T x) {
+   *      $functionBody
+   *    }
+   */
   def map[B : CLType : ClassTag](functionBody: String) : CLRDD[B] = {
     new CLRDD(wrapped.map(_.map[B](functionBody)), parentRDD, cpu)
   }
 
+  /** Compute uniformly weighted moving average
+   *
+   *  Scary looking types enable CLRDD[(Int,Int)].movingAverage -> CLRDD[(Double,Double)]
+   */
   def movingAverage(width: Int)(implicit clT: CLType[T]) : CLRDD[clT.doubleCLInstance.elemType] = {
     val clRes = clT.doubleCLInstance
     sliding[clT.doubleCLInstance.elemType](width, 1,
@@ -93,6 +112,13 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
     )(clT.doubleCLInstance.selfInstance, clT.doubleCLInstance.elemClassTag)
   }
 
+  /** Apply a sliding window transformation
+   *
+   *  The accesible window of size $width will be moved in $stride steps over all data.
+   *  Will be horribly inefficient if there are any chunks with less than width-1 elements!
+   *  @param functionBody will be put inside an OpenCL function, see map. Input
+   *    is available via a GET(i) macro. Valid values for i are in [0;width).
+   */
   def sliding[B: CLType : ClassTag](width: Int, stride: Int, functionBody: String) : CLRDD[B] = {
     case class FastPathImpossible(smallSize: Long) extends Exception
     val numPartitions = wrapped.partitions.size
@@ -154,6 +180,9 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
     wrapped.map(_.count).fold(0L)(_+_)
   }
 
+  /** Run an associative, commutative reduction. kernel is executed on each
+   *  partition, Spark reduce with e, combine afterwards.
+   */
   def reduce[B: ClassTag : CLType](kernel: MapReduceKernel[T, B], e: B, combine: (B,B) => B) : B = {
     wrapped.map(_.reduce(kernel, e, combine)).reduce(combine)
   }
@@ -186,7 +215,9 @@ class CLRDD[T : ClassTag : CLType](val wrapped: RDD[CLPartition[T]], val parentR
     ), num.zero, ((x: T, y: T) => num.plus(x,y)))
   }
 
-  /*
+  /**
+   * Try to keep the contained data on the device afterwards.
+   *
    * Cache state is currently not preserved across failures.
    * This enables computations which need more memory than available to
    * succeed. On the other hand it goes against the intent of the user.
@@ -234,6 +265,10 @@ trait CLPartition[T] {
   @transient protected var storage : Array[OpenCL.Chunk[T]] = null
   private var _doCache = false
   def doCache = _doCache
+  /** Abstract method that "defines" a CLPartition.
+   *
+   *  Users of CLPartition call get, which potentially caches data.
+   */
   protected def src : (OpenCLSession, Iterator[OpenCL.Chunk[T]])
   def get : (OpenCLSession, Iterator[OpenCL.Chunk[T]]) = {
     if(doCache) {

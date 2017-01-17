@@ -137,6 +137,10 @@ object OpenCL
     }
     override def finalize = {
       if(handle != null) {
+        /*
+         * If you arrive at this warning often, be advised that it can easily
+         * lead to out of memory situations (on the device). Close your chunks.
+         */
         LoggerFactory.getLogger(getClass).warn("closing chunk {} on finalization", this)
         close
       }

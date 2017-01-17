@@ -10,6 +10,10 @@ import java.nio.ByteBuffer
 
 
 package object cl {
+  /*
+   * This is a placeholder object for the macro to consume.
+   * It will put implicit CLType instances here, see its source.
+   */
   @GeneratePrimitiveCLTypes
   object ImplicitCLTypes
 }

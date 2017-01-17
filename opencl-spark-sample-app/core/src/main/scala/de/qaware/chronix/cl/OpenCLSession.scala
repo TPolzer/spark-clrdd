@@ -27,6 +27,12 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   val executionTime = new AtomicLong
   log.info("created OpenCLSession")
 
+  /** Iterate over the values contained inside a Chunk.
+   *
+   *  This code could be a lot less complex if Java supported ByteBuffers of
+   *  size > 2GiB. This can happen, e.g. if the original chunks are near 2GiB
+   *  in size and are then mapped to a bigger datatype.
+   */
   case class ChunkIterator[T](chunk: Chunk[T])(implicit clT: CLType[T])
     extends Iterator[T] with java.io.Closeable
   {
@@ -155,8 +161,9 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   /*
    * For some OpenCL implementations, allocating small buffers is quite
    * expensive (NVIDIA, I'm looking at you), even if they are freed again
-   * rapidly. This is a free-list of 32*64KB = 2MB. Each reduce needs two of
-   * them, one for the result and one for intermediate storage.
+   * rapidly. This is a free-list of 32*64KB = 2MB. Each reduce needs one such
+   * piece fpr intermediate storage (The final result is copied to a direct
+   * ByteBuffer).
    */
   val dustSize = 8*8*1024
   val dustQueue = new java.util.concurrent.ConcurrentLinkedQueue[cl_mem]
@@ -241,7 +248,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
   /**
    * Map one Chunk to a new one.
    * @param functionBody the body of the map function 'inline B f(A x) {#functionBody}'.
-   * @param destructive if true, mapping is done in place if possible
+   * @param destructive if true, mapping is done in place if possible (if not, input is closed)
    */
   def mapChunk[A,B](input: Chunk[A], kernel: MapKernel[A,B], destructive: Boolean = false)(implicit clA: CLType[A], clB: CLType[B]) : Chunk[B] = {
     if(input.size == 0) {
@@ -330,13 +337,15 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
 
   val ALLOC_HOST_PTR_ON_DEVICE = {
     /*
-     * This decides if writing to a host mapped ALLOC_HOST_PTR buffer is
-     * enough. If false, contents are first written to (pinned)
-     * ALLOC_HOST_PTR_ON_DEVICE and then clEnqueueCopyBuffer to an 'ordinary'
-     * device buffer. If the first buffer is already on the device this
-     * effectively halves the usable accelerator memory. On the other hand just
-     * using the first buffer if it does not reside on the device would reduce
-     * (memory bound) computations to bus speed.
+     * This decides if writing to a host mapped ALLOC_HOST_PTR buffer is enough
+     * to ensure memory ultimately ends up on device side memory. If false,
+     * contents are first written to (pinned) ALLOC_HOST_PTR_ON_DEVICE and then
+     * clEnqueueCopyBuffer to an 'ordinary' device buffer. If the first buffer
+     * is already on the device this effectively halves the usable accelerator
+     * memory for big buffers. On the other hand just using the first buffer if
+     * it does not reside on the device would reduce (memory bound)
+     * computations to bus speed.
+     *
      * TODO make a better choice here, CL_DEVICE_HOST_UNIFIED_MEMORY is deprecated
      */
     val buffer = Array(0)
@@ -363,7 +372,7 @@ class OpenCLSession (val context: cl_context, val queue: cl_command_queue, val d
       var allocatedSize : Int = 0
       try {
         // Allocating direct buffers via ByteBuffer is prone to oom problems
-        // it's faster anyway to refcount this
+        // it's faster anyway to refcount this (and it might end up as device side storage (: )
         //val rawBuffer = ByteBuffer.allocateDirect(groupSize)
         on_host = Some(clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, groupSize, null, null))
         val rawBuffer = clEnqueueMapBuffer(queue, on_host.get, true, CL_MAP_WRITE_INVALIDATE_REGION, 0, groupSize, 0, null, null, null)

@@ -8,6 +8,12 @@ import org.openjdk.jmh.annotations._
 import org.slf4j.LoggerFactory
 import java.util.concurrent.TimeUnit
 
+/*
+ * Several constants in this file need tuning depending on available (GPU)
+ * memory and cluster size. This is less than optimal, but static annotations
+ * can only get you so far...
+ */
+
 object BenchmarksLarge {
   final val size = 2048
 //  final val size = 16384

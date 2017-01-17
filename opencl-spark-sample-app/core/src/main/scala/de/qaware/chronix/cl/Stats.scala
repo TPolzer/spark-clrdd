@@ -6,6 +6,10 @@
  *
  * Interoperability is sadly impossible, since the original class is closed
  * against extension.
+ *
+ * The OpenCL translation and CLType instance is original work by Tobias Polzer, 2016
+ *
+ * CHECK THE LICENSE BEFORE DISTRIBUTING THIS FILE!
  */
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
