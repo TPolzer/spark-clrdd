@@ -9,24 +9,16 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.TimeUnit
 
 object BenchmarksLarge {
-//  final val size = 65536
   final val size = 2048
+//  final val size = 16384
 }
 
 @OperationsPerInvocation(BenchmarksLarge.size)
 class BenchmarksLarge extends BenchmarksCommon {
 
   @Param(Array("64", "128", "512", "1024"))
-//  @Param(Array("4096", "16384", "32768", "65536"))
+//  @Param(Array("512", "1024", "4096", "16384"))
   override var size : Long = 0
-  override def partitions : Int = {
-    if(cpu)
-//      16*5
-      8
-    else
-//      4*5 * 2
-      2
-  }
   @Param(Array("true", "false"))
   override var cpu = true
 
@@ -120,22 +112,16 @@ class BenchmarksLarge extends BenchmarksCommon {
 }
 
 object BenchmarksSmall {
-  final val size = 64
+//  final val size = 128
+  final val size = 32
 }
 
 @OperationsPerInvocation(BenchmarksSmall.size)
 class BenchmarksSmall extends BenchmarksCommon {
 
+//  @Param(Array("8", "16", "32", "64", "128"))
   @Param(Array("1", "2", "4", "16", "32"))
   override var size : Long = 0
-  override def partitions : Int = {
-    if(cpu)
-//      16*5
-      8
-    else
-//      4*5
-      2
-  }
   @Param(Array("true", "false"))
   override var cpu = true
 

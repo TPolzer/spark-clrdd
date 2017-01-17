@@ -46,17 +46,30 @@ abstract class BenchmarksCommon {
     sc.stop
   }
 
+  @Setup
+  def setExecutors : Unit = {
+    val props = System.getProperties();
+    props.setProperty("spark.executor.cores", execPerNode.toString)
+    props.setProperty("spark.cores.max", partitions.toString)
+  }
+
   def rdd: RDD[Long]
   def crdd: CLRDD[Long]
   var cpu: Boolean
   def totalSize: Long
   var size: Long
-  def partitions: Int
+  def execPerNode : Int = {
+    if(cpu)
+      4 * 2 // cores * oversubscription
+    else
+      1 * 2 // GPUs * oversubscription
+  }
+  def partitions : Int = execPerNode * 1 // * numberOfNodes
   
   lazy val chunks = {
-    val chunkSize = size*1024*1024/partitions
+    val chunkSize = size*1024*1024/execPerNode
     assert(chunkSize <= Int.MaxValue)
-    for(i <- 1 to partitions) yield {
+    for(i <- 1 to execPerNode) yield {
       val session = OpenCL.get(cpu)
       val it = session.stream((1L to chunkSize/8).iterator, chunkSize.toInt)
       val res = it.next
