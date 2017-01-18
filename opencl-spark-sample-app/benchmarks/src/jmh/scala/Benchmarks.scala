@@ -35,16 +35,16 @@ class BenchmarksLarge extends BenchmarksCommon {
 
   override lazy val rdd = {
     OpenCL.CPU = cpu
-    sc.range(0, size*1024*1024/8, 1, partitions).cache
+    sc.range(0, size*1024*1024/8, 1, partitions).map(_.toDouble).cache
   }
   override lazy val crdd = {
     OpenCL.CPU = cpu
     var chunks = partitions
     log.warn("rdd has {} partitions", chunks)
-    var crdd : CLRDD[Long] = null
+    var crdd : CLRDD[Double] = null
     while(crdd == null) {
       try { 
-        crdd = CLRDD.wrap(sc.range(0, size*1024*1024/8, 1, partitions), Some((size*1024*1024/8+chunks-1)/chunks)).cacheGPU
+        crdd = CLRDD.wrap(sc.range(0, size*1024*1024/8, 1, partitions).map(_.toDouble), Some((size*1024*1024/8+chunks-1)/chunks)).cacheGPU
         crdd.sum
       } catch {
         case (e: Throwable) => {
@@ -78,6 +78,12 @@ class BenchmarksLarge extends BenchmarksCommon {
   override def stats = {
     assert(cpu)
     super.stats
+  }
+
+  @Benchmark
+  override def fastSum = {
+    assert(cpu)
+    super.fastSum
   }
 
   @Benchmark
@@ -138,7 +144,7 @@ class BenchmarksSmall extends BenchmarksCommon {
 
   override lazy val rdd = {
     OpenCL.CPU = cpu
-    sc.range(0, size*1024*1024/8, 1, partitions).cache
+    sc.range(0, size*1024*1024/8, 1, partitions).map(_.toDouble).cache
   }
   override lazy val crdd = {
     OpenCL.CPU = cpu
@@ -158,6 +164,12 @@ class BenchmarksSmall extends BenchmarksCommon {
   override def stats = {
     assert(cpu)
     super.stats
+  }
+
+  @Benchmark
+  override def fastSum = {
+    assert(cpu)
+    super.fastSum
   }
  
   @Benchmark

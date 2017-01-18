@@ -12,7 +12,7 @@ import scala.concurrent.duration._
 import scala.concurrent.Await
 
 object BenchmarksCommon {
-  def arraySum(a: Array[Long]) = {
+  def arraySum(a: Array[Double]) = {
     var res = 0.0
     var i = 0
     while(i != a.length) {
@@ -53,8 +53,8 @@ abstract class BenchmarksCommon {
     props.setProperty("spark.cores.max", partitions.toString)
   }
 
-  def rdd: RDD[Long]
-  def crdd: CLRDD[Long]
+  def rdd: RDD[Double]
+  def crdd: CLRDD[Double]
   var cpu: Boolean
   def totalSize: Long
   var size: Long
@@ -71,7 +71,7 @@ abstract class BenchmarksCommon {
     assert(chunkSize <= Int.MaxValue)
     for(i <- 1 to execPerNode) yield {
       val session = OpenCL.get(cpu)
-      val it = session.stream((1L to chunkSize/8).iterator, chunkSize.toInt)
+      val it = session.stream((1L to chunkSize/8).iterator.map(_.toDouble), chunkSize.toInt)
       val res = it.next
       assert(!it.hasNext)
       (session, res)
@@ -100,7 +100,7 @@ abstract class BenchmarksCommon {
 
   def rawclsum = {
     var res = 0.0
-    val clL = implicitly[CLType[Long]]
+    val clL = implicitly[CLType[Double]]
     val clD = implicitly[CLType[Double]]
     val kernel = MapReduceKernel(
       MapFunction("return x;", clL, clD),
@@ -110,7 +110,7 @@ abstract class BenchmarksCommon {
       clL, clD
     ) 
     sizeLoop {
-      val fs = chunks.par.map({case (session: OpenCLSession, chunk:OpenCL.Chunk[Long]) => {
+      val fs = chunks.par.map({case (session: OpenCLSession, chunk:OpenCL.Chunk[Double]) => {
         val f = session.reduceChunk(chunk, kernel)
         Await.result(f, Duration.Inf)
       }})
@@ -161,6 +161,20 @@ abstract class BenchmarksCommon {
       i += size
     }
     assert(res.count == totalSize.toLong*1024*1024/8, res.count)
+    res
+  }
+
+  def fastSum = {
+    var res = 0.0
+    sizeLoop {
+      res += sc.runJob(rdd, ((it:Iterator[Double]) => {
+        var total = 0.0;
+        while(it.hasNext) {
+          total += it.next
+        }
+        total
+      })).sum
+    }
     res
   }
 }
