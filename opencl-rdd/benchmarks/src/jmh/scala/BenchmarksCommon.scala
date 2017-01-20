@@ -49,6 +49,7 @@ abstract class BenchmarksCommon {
   @Setup
   def setExecutors : Unit = {
     val props = System.getProperties();
+    //ensure even distribution of data over devices
     props.setProperty("spark.executor.cores", execPerNode.toString)
     props.setProperty("spark.cores.max", partitions.toString)
   }

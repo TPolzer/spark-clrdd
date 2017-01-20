@@ -1,3 +1,7 @@
+/*
+ * Program to format the jmh reports into table data with one row for each
+ * size. Averages over multiple runs with weigts the number if iterations.
+ */
 #include <iostream>
 #include <map>
 #include <regex>
