@@ -1,1 +1,1 @@
-This software was part of my master's thesis. It provides a Spark RDD which can store and process data with OpenCL. It is probably not complete enough for your purposes, but feel free to use it under the terms the Apache Licence 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+This software was part of my master's thesis. It provides a Spark RDD which can store and process data with OpenCL. It is probably not complete enough for your purposes, but feel free to use it under the terms of the Apache Licence 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
